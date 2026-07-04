@@ -1,6 +1,7 @@
 #include "server.hpp"
 
 extern "C" {
+#include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 }
@@ -10,6 +11,7 @@ extern "C" {
 #include "layout.hpp"
 #include "output.hpp"
 #include "popup.hpp"
+#include "session_lock.hpp"
 #include "toplevel.hpp"
 #include "view.hpp"
 #include "xwayland_view.hpp"
@@ -107,6 +109,16 @@ bool Server::setup() {
     new_output.connect(
         &backend->events.new_output, [this](wlr_output* wlr_output) {
             outputs.push_back(std::make_unique<Output>(*this, wlr_output));
+            // A monitor plugged in mid-lock must come up covered in
+            // black, not showing whatever the tiling layout would put
+            // there -- session_lock is null in the fail-safe "client
+            // crashed" state (see session_lock.hpp), so this
+            // intentionally does nothing in that case; the orphaned
+            // backdrops from the crashed lock don't extend to a brand
+            // new output either, which is a known gap, not a decision.
+            if(session_locked && session_lock) {
+                session_lock->addOutput(*outputs.back());
+            }
         });
 
     // 6. scene graph. wlroots owns damage tracking, occlusion culling, and
@@ -148,6 +160,40 @@ bool Server::setup() {
             // anywhere, or it becomes a zombie holding a dangling pointer.
             auto surface = std::make_unique<LayerSurface>(*this, ls);
             if(surface->valid) { layer_surfaces.push_back(std::move(surface)); }
+        });
+
+    // 7b. session lock (ext-session-lock-v1, wrapped by wlroots as
+    // wlr_session_lock_manager_v1/wlr_session_lock_v1): a dedicated lock
+    // daemon (swaylock and friends) asks to blank and own every output
+    // until it says otherwise. The actual "make it locked" work -- per-
+    // output backdrops, per-output client surfaces, keyboard-focus
+    // handoff, the crash-vs-clean-unlock distinction -- lives in its own
+    // SessionLock type (session_lock.{hpp,cpp}) for the same reason
+    // LayerSurface/Popup aren't inlined into Server: enough state that
+    // inlining it here would bloat this file for a feature only that one
+    // type needs to know the internals of.
+    session_lock_manager = wlr_session_lock_manager_v1_create(display);
+    new_session_lock.connect(
+        &session_lock_manager->events.new_lock,
+        [this](wlr_session_lock_v1* lock) {
+            if(session_lock) {
+                // Already locked -- a second lock client (two instances
+                // of swaylock racing each other, a buggy autostart that
+                // launches one twice) doesn't get to pile on top of the
+                // first one's UI. Refuse outright rather than silently
+                // replacing it, which would be a strange thing to do to
+                // something this security-sensitive. Note this checks
+                // session_lock, not session_locked -- see session_lock.hpp
+                // for why a lock client that crashed without unlocking
+                // (session_locked still true, session_lock already null)
+                // must still be replaceable by a new one.
+                wlr_log(WLR_ERROR,
+                        "session already locked, refusing new lock request");
+                wlr_session_lock_v1_destroy(lock);
+                return;
+            }
+            session_locked = true;
+            session_lock   = std::make_unique<SessionLock>(*this, lock);
         });
 
     // 8. input: seat + per-device handling as new_input fires
@@ -202,16 +248,17 @@ bool Server::setup() {
             if(xcursor && xcursor->image_count > 0) {
                 wlr_xcursor_image* image = xcursor->images[0];
                 wlr_xwayland_set_cursor(xwayland,
-                                       wlr_xcursor_image_get_buffer(image),
-                                       image->hotspot_x,
-                                       image->hotspot_y);
+                                        wlr_xcursor_image_get_buffer(image),
+                                        image->hotspot_x,
+                                        image->hotspot_y);
             }
         });
 
         setenv("DISPLAY", xwayland->display_name, true);
     } else {
-        wlr_log(WLR_ERROR,
-                "wlr_xwayland_create failed -- continuing without X11 app support");
+        wlr_log(
+            WLR_ERROR,
+            "wlr_xwayland_create failed -- continuing without X11 app support");
     }
 
     // 9. listen on a free Wayland socket, start the backend, run.
@@ -283,6 +330,17 @@ int Server::run(int argc, char** argv) {
 // ----------------------------------------------------------------------------
 
 void Server::focusView(View* view) {
+    // Toplevel/XWaylandView call this unconditionally on map and on
+    // unmap-picks-next (toplevel.cpp, xwayland_view.cpp) -- neither of
+    // those call sites knows or should need to know about session locks.
+    // Centralizing the refusal here, once, is what actually closes that
+    // gap for all of them (plus the click handler in input.cpp and the
+    // alt-tab-style bind in lua_config.cpp) at the same time, rather than
+    // needing every call site to remember to check. SessionLockSurface::
+    // handleMap is the only thing allowed to grant keyboard focus while
+    // session_locked is set.
+    if(session_locked) { return; }
+
     if(focused_view == view) { return; }
     Output* prev_output = focused_view ? focused_view->output : nullptr;
 

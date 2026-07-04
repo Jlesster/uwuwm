@@ -166,7 +166,28 @@ Output::Output(Server& server, struct wlr_output* wlr_output)
     if(!server.focused_output) { server.focused_output = this; }
 }
 
-Output::~Output() { wl_list_remove(&frame_listener.link); }
+Output::~Output() {
+    wl_list_remove(&frame_listener.link);
+
+    // Unlike background_rect (never explicitly destroyed -- it lives
+    // under a shared layer_tree that outlives any one Output, and letting
+    // it go stale silently is harmless), a black lock backdrop surviving
+    // an output unplug mid-lock would be actively misleading: nothing
+    // else will ever destroy this one, since it isn't parented under
+    // anything this Output owns end-to-end. SessionLock::~SessionLock
+    // also nulls this field out on a clean unlock, so this is purely the
+    // mid-lock-unplug case.
+    if(lock_backdrop) { wlr_scene_node_destroy(&lock_backdrop->node); }
+
+    // lock_surface, if set, is owned by SessionLock::surfaces, not here --
+    // this Output going away doesn't own it and must not delete it.
+    // Whether wlroots tears down the underlying wlr_session_lock_surface_
+    // v1 synchronously when its output disappears (letting
+    // SessionLockSurface::handleDestroy clean itself up the normal way)
+    // is unverified without a live wlroots-0.20 install; treat this as
+    // the one spot to check first if unplugging a monitor mid-lock is
+    // ever observed to crash or leave a dangling surface.
+}
 
 void Output::updateLayoutBox() {
     wlr_output_layout_get_box(server.output_layout, wlr_output, &layout_box);
@@ -177,6 +198,27 @@ void Output::updateLayoutBox() {
             background_rect, layout_box.width, layout_box.height);
         wlr_scene_node_set_position(
             &background_rect->node, layout_box.x, layout_box.y);
+    }
+
+    // A resolution/scale/transform change (uwu.monitor.set via rc.lua
+    // hot-reload, or a monitor renegotiating its mode) must keep the
+    // lock backdrop covering the whole output -- an unresized black rect
+    // next to a resized real output would leave a gap that isn't black,
+    // which defeats the entire point.
+    if(lock_backdrop) {
+        wlr_scene_rect_set_size(
+            lock_backdrop, layout_box.width, layout_box.height);
+        wlr_scene_node_set_position(
+            &lock_backdrop->node, layout_box.x, layout_box.y);
+    }
+    if(lock_surface) {
+        wlr_scene_node_set_position(
+            &lock_surface->scene_tree->node, layout_box.x, layout_box.y);
+        // Deliberately not re-calling wlr_session_lock_surface_v1_configure
+        // here -- the client would need to redraw at the new size, which
+        // is exactly the kind of live-resize-while-locked edge case not
+        // worth chasing for a first pass. Repositioning at least keeps a
+        // stale-sized surface in the right corner rather than drifting.
     }
 }
 
@@ -316,8 +358,8 @@ void Output::setTagset(uint32_t new_tagset) {
 
     tagset = new_tagset;
     layout::arrange(*this);  // computes + applies final geo for every
-                              // *entering* tiled view, and disables every
-                              // view that matches neither tagset
+                             // *entering* tiled view, and disables every
+                             // view that matches neither tagset
 
     for(View* v : leaving) { v->playSlideOut(-dx, 0); }
     for(auto& v : server.views) {

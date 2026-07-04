@@ -36,6 +36,9 @@ struct Keyboard;
 struct wlr_layer_shell_v1;
 struct wlr_xwayland;
 struct wlr_xwayland_surface;
+struct wlr_session_lock_manager_v1;
+struct wlr_session_lock_v1;
+struct SessionLock;
 
 enum class CursorMode {
     Passthrough,
@@ -59,22 +62,23 @@ public:
 
     LuaConfig lua_cfg;
 
-    wl_display*              display        = nullptr;
-    wlr_backend*             backend        = nullptr;
-    wlr_session*             session        = nullptr;
-    bool                     session_active = true;
-    wlr_renderer*            renderer       = nullptr;
-    wlr_allocator*           allocator      = nullptr;
-    wlr_compositor*          compositor     = nullptr;
-    wlr_output_layout*       output_layout  = nullptr;
-    wlr_scene*               scene          = nullptr;
-    wlr_scene_output_layout* scene_layout   = nullptr;
-    wlr_xdg_shell*           xdg_shell      = nullptr;
-    wlr_layer_shell_v1*      layer_shell    = nullptr;
-    wlr_seat*                seat           = nullptr;
-    wlr_cursor*              cursor         = nullptr;
-    wlr_xcursor_manager*     cursor_mgr     = nullptr;
-    wlr_xwayland* xwayland = nullptr;
+    wl_display*                  display              = nullptr;
+    wlr_backend*                 backend              = nullptr;
+    wlr_session*                 session              = nullptr;
+    bool                         session_active       = true;
+    wlr_renderer*                renderer             = nullptr;
+    wlr_allocator*               allocator            = nullptr;
+    wlr_compositor*              compositor           = nullptr;
+    wlr_output_layout*           output_layout        = nullptr;
+    wlr_scene*                   scene                = nullptr;
+    wlr_scene_output_layout*     scene_layout         = nullptr;
+    wlr_xdg_shell*               xdg_shell            = nullptr;
+    wlr_layer_shell_v1*          layer_shell          = nullptr;
+    wlr_seat*                    seat                 = nullptr;
+    wlr_cursor*                  cursor               = nullptr;
+    wlr_xcursor_manager*         cursor_mgr           = nullptr;
+    wlr_xwayland*                xwayland             = nullptr;
+    wlr_session_lock_manager_v1* session_lock_manager = nullptr;
 
     wlr_scene_tree* layer_tree[4] = {};
     wlr_scene_tree* window_tree   = nullptr;
@@ -83,6 +87,23 @@ public:
     std::list<std::unique_ptr<View>>         views;
     std::list<std::unique_ptr<LayerSurface>> layer_surfaces;
     std::list<std::unique_ptr<Keyboard>>     keyboards;
+
+    // True from the moment a lock is granted (SessionLock's constructor
+    // runs) until a clean unlock -- unlike `bool(session_lock)`, this
+    // does NOT flip back off if the lock client dies without unlocking;
+    // see session_lock.hpp's header comment for why that split exists.
+    // Keyboard::handleKey and Server::focusView both gate on this, not on
+    // session_lock, so every input path stays blocked through that
+    // fail-safe case too.
+    bool session_locked = false;
+
+    // Declared after outputs/views/layer_surfaces/keyboards above
+    // deliberately: members destruct in reverse declaration order, and
+    // ~SessionLock() walks `outputs` to clear per-output lock_backdrop/
+    // lock_surface pointers. Declaring session_lock any earlier would let
+    // `outputs` be destroyed first during ~Server(), leaving ~SessionLock
+    // to walk a list of already-freed Output objects.
+    std::unique_ptr<SessionLock> session_lock;
 
     Output* focused_output = nullptr;
     View*   focused_view   = nullptr;
@@ -93,13 +114,13 @@ public:
     wlr_box    grab_geobox{};
     uint32_t   resize_edges = 0;
 
-    void focusView(View* view);
-    void closeOnTag(uint32_t tagmask);
+    void    focusView(View* view);
+    void    closeOnTag(uint32_t tagmask);
     Output* outputAt(double lx, double ly);
     void    arrangeAllOutputs();
     Output* getFocusedOrDefaultOutput();
-    void tickAnimations();
-    void reloadConfig();
+    void    tickAnimations();
+    void    reloadConfig();
 
     // Cursor listeners (public so input::setupCursor can access them)
     Listener<wlr_pointer_motion_event>          cursor_motion;
@@ -117,6 +138,7 @@ private:
     Listener<wlr_layer_surface_v1>                      new_layer_surface;
     Listener<wlr_xwayland_surface>                      new_xwayland_surface;
     VoidListener                                        xwayland_ready;
+    Listener<wlr_session_lock_v1>                       new_session_lock;
     Listener<wlr_input_device>                          new_input;
     Listener<wlr_seat_pointer_request_set_cursor_event> request_set_cursor;
     Listener<wlr_seat_request_set_selection_event>      request_set_selection;
@@ -128,4 +150,5 @@ private:
     friend struct XWaylandView;
     friend struct LayerSurface;
     friend struct Keyboard;
+    friend struct SessionLock;
 };

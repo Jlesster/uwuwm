@@ -12,6 +12,7 @@ extern "C" {
 
 class Server;
 struct MonitorRule;
+struct SessionLockSurface;
 
 // One physical (or nested-window, in dev mode) display. Equivalent to dwl's
 // `Monitor`.
@@ -23,6 +24,18 @@ struct Output {
     wlr_output*       wlr_output;
     wlr_scene_output* scene_output    = nullptr;
     wlr_scene_rect*   background_rect = nullptr;
+
+    // Set by SessionLock while server.session_locked -- see
+    // session_lock.{hpp,cpp}. Both non-owning except lock_backdrop, which
+    // this Output explicitly destroys in its own destructor (unlike
+    // background_rect) since a stray full-black rect surviving an output
+    // unplug mid-lock is a far worse failure mode than a stray
+    // wallpaper-colored one. lock_surface is never owned here -- it's
+    // owned by SessionLock::surfaces -- this is just how SessionLock
+    // finds "does this output already have one" without its own
+    // per-output map.
+    wlr_scene_rect*     lock_backdrop = nullptr;
+    SessionLockSurface* lock_surface  = nullptr;
 
     wlr_box
         layout_box{};  // position+size in output-layout (global) coordinates
