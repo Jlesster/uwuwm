@@ -3,6 +3,8 @@
 extern "C" {
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
+#include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
+#include <wlr/types/wlr_output_power_management_v1.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
@@ -141,6 +143,47 @@ bool Server::setup() {
     // given surface's current hint at commit time. See
     // Output::handleFrame.
     tearing_control_manager = wlr_tearing_control_manager_v1_create(display, 1);
+
+    // zwp-keyboard-shortcuts-inhibit-unstable-v1: lets a client ask that
+    // its key events bypass compositor keybind handling entirely while
+    // it holds keyboard focus -- what remote-desktop viewers, VM
+    // consoles, and games wanting Alt+Tab for themselves reach for. We
+    // activate every inhibitor unconditionally the moment it's
+    // requested: there's no legitimate reason for a client to lie about
+    // wanting this, and a confirmation prompt has no good UI answer from
+    // inside a compositor with no chrome (same call sway makes). The
+    // enforcement side lives in input::shortcutsInhibited, which walks
+    // this manager's own `inhibitors` list rather than us tracking a
+    // parallel one -- see Keyboard::handleKey in input.cpp.
+    shortcuts_inhibit_manager =
+        wlr_keyboard_shortcuts_inhibit_v1_create(display);
+    new_shortcuts_inhibitor.connect(
+        &shortcuts_inhibit_manager->events.new_inhibitor,
+        [this](wlr_keyboard_shortcuts_inhibitor_v1* inhibitor) {
+            wlr_keyboard_shortcuts_inhibitor_v1_activate(inhibitor);
+        });
+
+    // wlr-output-power-management-unstable-v1: DPMS control from
+    // software -- an idle daemon (swayidle) or a power applet asks to
+    // blank/wake a specific output on demand. `event->output` already
+    // names the exact wlr_output to touch, so there's no lookup through
+    // `outputs` needed here; we just re-apply `enabled` as a bare
+    // output-state commit, the same mechanism Output::applyRule uses for
+    // uwu.monitor.set(). wlroots' own implementation listens to that
+    // output's commit signal on our behalf and notifies bound clients of
+    // the resulting mode, so this signal handler is the entire
+    // integration.
+    output_power_manager = wlr_output_power_manager_v1_create(display);
+    output_power_set_mode.connect(
+        &output_power_manager->events.set_mode,
+        [this](wlr_output_power_v1_set_mode_event* event) {
+            wlr_output_state state;
+            wlr_output_state_init(&state);
+            wlr_output_state_set_enabled(
+                &state, event->mode == ZWLR_OUTPUT_POWER_V1_MODE_ON);
+            wlr_output_commit_state(event->output, &state);
+            wlr_output_state_finish(&state);
+        });
 
     output_layout = wlr_output_layout_create(display);
 

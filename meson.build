@@ -96,6 +96,7 @@ protocols_src = wl_protocol_gen.process(
     wl_protocol_dir / 'stable/xdg-shell/xdg-shell.xml',
     wl_protocol_dir / 'unstable/pointer-constraints/pointer-constraints-unstable-v1.xml',
     'protocols/wlr-layer-shell-unstable-v1.xml',
+    'protocols/wlr-output-power-management-unstable-v1.xml',
 )
 
 # ── Sources ──────────────────────────────────────────────────────────────

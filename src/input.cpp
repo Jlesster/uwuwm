@@ -5,6 +5,7 @@ extern "C" {
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
+#include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
 #include <wlr/types/wlr_pointer.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
@@ -306,7 +307,16 @@ void Keyboard::handleKey(wlr_keyboard_key_event* event) {
                 }
             }
         }
-        if(!handled) {
+        // A client holding an active keyboard-shortcuts-inhibitor for
+        // whichever surface currently has focus (remote-desktop viewer,
+        // VM console, a game that wants Alt+Tab for itself) gets every
+        // key raw -- skip Lua keybind dispatch entirely rather than
+        // stealing binds out from under it. VT-switch above is
+        // deliberately exempt: it's a session-level escape hatch, not a
+        // compositor keybind the inhibiting client could plausibly want
+        // routed to itself, and losing it under a frozen/misbehaving
+        // client would turn "reach for another TTY" into "reboot".
+        if(!handled && !input::shortcutsInhibited(server)) {
             handled = handleKeybind(event->keycode, modifiers_state);
         }
     }
@@ -505,6 +515,27 @@ void processCursorMotion(Server& server, uint32_t time_msec) {
 void resetCursorMode(Server& server) {
     server.cursor_mode  = CursorMode::Passthrough;
     server.grabbed_view = nullptr;
+}
+
+bool shortcutsInhibited(Server& server) {
+    if(!server.shortcuts_inhibit_manager) { return false; }
+
+    wlr_surface* focused = server.seat->keyboard_state.focused_surface;
+    if(!focused) { return false; }
+
+    // wlroots keeps every live inhibitor -- regardless of surface or
+    // active-state -- on the manager's own `inhibitors` list, so we walk
+    // it directly instead of tracking a parallel wrapper list the way
+    // PointerConstraint does below. This only runs once per keypress on
+    // the compositor-keybind path (not the hot per-motion pointer path),
+    // and the list is realistically one or two entries long, so a linear
+    // scan costs nothing worth optimizing.
+    wlr_keyboard_shortcuts_inhibitor_v1* inhibitor;
+    wl_list_for_each(
+        inhibitor, &server.shortcuts_inhibit_manager->inhibitors, link) {
+        if(inhibitor->surface == focused && inhibitor->active) { return true; }
+    }
+    return false;
 }
 
 void newPointerConstraint(Server&                    server,

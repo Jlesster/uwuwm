@@ -87,4 +87,14 @@ void updateSeatCapabilities(Server& server);
 void newPointerConstraint(Server&                    server,
                           wlr_pointer_constraint_v1* constraint);
 
+// True if the surface currently holding keyboard focus has an active
+// zwp_keyboard_shortcuts_inhibitor_v1 -- i.e. some client has asked for
+// its keys to bypass compositor keybind handling and we've granted that
+// (see Server::setup, which activates every inhibitor unconditionally).
+// Walks server.shortcuts_inhibit_manager's own inhibitor list rather
+// than a wrapper of our own, since wlroots already tracks surface +
+// active-state for us. Checked from Keyboard::handleKey before Lua
+// keybind dispatch.
+bool shortcutsInhibited(Server& server);
+
 }  // namespace input

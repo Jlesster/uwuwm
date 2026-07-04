@@ -44,26 +44,56 @@ a spec, and re-verify against `src/` before trusting an item here for long.
   Uncapped-fps games get the latency win; nothing else on the output can tear
   the desktop out from under itself, since the check only ever passes for the
   sole focused fullscreen client.
-
-## Will bite you on your gaming stack specifically
-
-- **No keyboard-shortcuts-inhibit.** A game or remote-input tool that wants to
-  grab all keys (e.g. capturing Alt+Tab) has no protocol to ask for that.
-- **No `wlr-output-power-management-v1` / DPMS control.** No way to blank/wake
-  outputs from software.
+- **xdg-decoration negotiation is wired**, contrary to the previous version of
+  this file, which claimed it was missing. `decoration.{hpp,cpp}` +
+  `xdg_decoration_manager` in `server.cpp` force server-side decoration mode on
+  every client and re-assert it on every `request_mode`, so GTK/Qt apps drawing
+  their own CSD over uwuwm's border was never actually a live gap.
+- **foreign-toplevel-management is wired**, contrary to the previous version of
+  this file, which claimed no window list/taskbar integration was possible.
+  Every mapped `View` owns a `wlr_foreign_toplevel_handle_v1` (see
+  `View::createForeignToplevel` / the request\_\*/destroy wiring in `view.cpp`)
+  with title/app_id/fullscreen/minimized/activated kept in sync both ways.
+  waybar's taskbar module, `wlrctl`, and similar tools work against this today.
+- **Keyboard-shortcuts-inhibit is wired
+  (`zwp-keyboard-shortcuts-inhibit-unstable-v1`).** `shortcuts_inhibit_manager`
+  in `server.cpp` grants every inhibit request unconditionally (matching sway's
+  behavior -- there's no good UI for a confirmation prompt from a chrome-less
+  compositor), and `input::shortcutsInhibited` (input.cpp) skips Lua keybind
+  dispatch entirely whenever the focused surface holds an active inhibitor, so a
+  remote-desktop viewer, VM console, or a game that wants Alt+Tab for itself now
+  gets it. VT-switch (Ctrl+Alt+Fn) is deliberately exempt -- it stays a
+  session-level escape hatch even under an inhibitor, so a frozen/misbehaving
+  client can't turn "switch to another TTY" into "reboot."
+- **DPMS / output power control is wired
+  (`wlr-output-power-management-unstable-v1`).** `output_power_manager` in
+  `server.cpp` re-applies `enabled` as a plain output-state commit whenever a
+  client (swayidle, a power applet) asks to blank/wake a specific output -- the
+  same commit path `Output::applyRule` already used for `uwu.monitor.set()`.
+  wlroots' own implementation listens to that output's commit signal and
+  notifies bound clients of the resulting mode, so the signal handler is the
+  entire integration.
 
 ## Quality-of-life you'll want within the first month
 
 - **No idle-inhibit.** Fullscreen video/games can't suppress screen-blank if you
   run an idle daemon.
-- **No xdg-decoration negotiation.** Some GTK apps may draw their own CSD over
-  uwuwm's thin border.
 - **No virtual-keyboard/virtual-pointer protocols.** Screen-sharing/remote-
   input-injection tools rely on these; without them, they won't work against
   uwuwm.
-- **No foreign-toplevel-management.** No window list/app-switcher/waybar- style
-  taskbar integration is possible yet -- nothing exposes toplevel state outside
-  the compositor.
+- **No cursor-shape-v1.** Newer client toolkits increasingly assume this instead
+  of drawing/loading their own xcursor theme; absence isn't fatal (xcursor
+  fallback still works) but it's a growing assumption to be behind on.
+- **No fractional-scale-v1.** Only integer output scale is available (see
+  `Output::applyRule`); a HiDPI/lodpi mixed-monitor setup is stuck rounding to
+  whole-number scale.
+- **No content-type-v1.** No way for a client to hint "I'm a game" for
+  scheduling/vsync decisions; not a blocker today since nothing in this codebase
+  would act on it yet, but it's the hook most compositor-side game-mode
+  heuristics build on.
+- **No xdg-activation.** No cross-client "please focus me, I have a good reason"
+  channel -- a launcher spawning a window can't ask for focus the way it could
+  ask a compositor that implements this.
 
 ## Explicitly out of scope, not gaps
 
@@ -96,15 +126,34 @@ above do.
   reasonable smoke test once you're on a real DRM session --
   nested-inside-Hyprland won't exercise the tearing page-flip path at all, since
   that's a KMS/atomic-commit feature the nested Wayland backend doesn't have.
+- **Keyboard-shortcuts-inhibit and DPMS**, just added -- not build-verified at
+  all yet (no wlroots-0.20 dev environment was available where these were
+  written; the API was checked by hand against wlroots' own headers/source, not
+  compiled against). First build should be watched closely for these two
+  specifically. Once it builds:
+  - Shortcuts-inhibit: a client that requests
+    `zwp_keyboard_shortcuts_inhibit_manager_v1` (a VNC/RDP client like `wlvncc`,
+    or `wl-mirror`-adjacent tools; there's no simple CLI to poke this with)
+    should get every key raw while focused, with Lua binds (including
+    `mod`-anything) silently not firing. Confirm VT-switch still works while
+    that same client is focused and inhibiting.
+  - DPMS: `wlopm --off <output>` or `swaymsg`-style tooling against
+    `zwlr_output_power_manager_v1` (anything speaking
+    wlr-output-power-management-unstable-v1) should blank the output immediately
+    and wake it back to its prior mode; confirm the output isn't left disabled
+    in `wlr-randr`-equivalent output listings after re-enabling.
 
 ## Suggested order of attack
 
-1. First real build + boot, nested inside Hyprland, then from a TTY.
+1. First real build + boot, nested inside Hyprland, then from a TTY -- pay
+   particular attention to keyboard-shortcuts-inhibit and DPMS, the two newest
+   additions, since neither has seen a compiler yet.
 2. Smoke-test session lock, including the crash path, before trusting it on a
    main machine.
-3. Smoke-test screencopy (`grim`), data-control (a clipboard manager), and
-   tearing-control (a Proton game with `vblank_mode=0`) -- all three are newly
-   wired and unverified against a live client.
-4. Keyboard-shortcuts-inhibit -- the remaining gaming-specific gap.
-5. DPMS, idle-inhibit, xdg-decoration, foreign-toplevel-management -- round
-   these out as they annoy you.
+3. Smoke-test screencopy (`grim`), data-control (a clipboard manager),
+   tearing-control (a Proton game with `vblank_mode=0`), keyboard-shortcuts-
+   inhibit (a remote-desktop/VM client), and DPMS (`wlopm` or equivalent) -- all
+   five are wired and unverified against a live client.
+4. Idle-inhibit, virtual-keyboard/virtual-pointer, cursor-shape-v1,
+   fractional-scale-v1, content-type-v1, xdg-activation -- round these out as
+   they annoy you.

@@ -48,6 +48,10 @@ struct wlr_xdg_decoration_manager_v1;
 struct wlr_xdg_toplevel_decoration_v1;
 struct ToplevelDecoration;
 struct wlr_foreign_toplevel_manager_v1;
+struct wlr_keyboard_shortcuts_inhibit_manager_v1;
+struct wlr_keyboard_shortcuts_inhibitor_v1;
+struct wlr_output_power_manager_v1;
+struct wlr_output_power_v1_set_mode_event;
 
 enum class CursorMode {
     Passthrough,
@@ -122,6 +126,27 @@ public:
     // toplevel" signal to wire here; toplevel handles only ever come from
     // our own wlr_foreign_toplevel_handle_v1_create() calls.
     wlr_foreign_toplevel_manager_v1* foreign_toplevel_manager = nullptr;
+
+    // zwp-keyboard-shortcuts-inhibit-unstable-v1: lets a client (remote-
+    // desktop viewer, VM console, or a game that wants Alt+Tab routed to
+    // itself instead of the compositor) ask that its key events bypass
+    // compositor keybind handling entirely while it holds keyboard focus.
+    // We grant every request unconditionally in Server::setup -- see the
+    // comment there -- so this is a bare global with nothing else to
+    // track on the Server side; enforcement reads the manager's own
+    // `inhibitors` list directly via input::shortcutsInhibited, checked
+    // from Keyboard::handleKey.
+    wlr_keyboard_shortcuts_inhibit_manager_v1* shortcuts_inhibit_manager =
+        nullptr;
+
+    // wlr-output-power-management-unstable-v1: DPMS control from
+    // software -- what an idle daemon (swayidle) or a power applet uses
+    // to blank/wake a specific output on demand. Like screencopy/
+    // data-control/tearing-control, this is a bare global; the only
+    // thing we feed it is the set_mode signal, wired in Server::setup,
+    // which just re-applies `enabled` as an output-state commit -- the
+    // same mechanism Output::applyRule uses for uwu.monitor.set().
+    wlr_output_power_manager_v1* output_power_manager = nullptr;
 
     wlr_scene_tree* layer_tree[4] = {};
     wlr_scene_tree* window_tree   = nullptr;
@@ -205,6 +230,8 @@ private:
     Listener<wlr_session_lock_v1>                       new_session_lock;
     Listener<wlr_pointer_constraint_v1>                 new_pointer_constraint;
     Listener<wlr_xdg_toplevel_decoration_v1>            new_toplevel_decoration;
+    Listener<wlr_keyboard_shortcuts_inhibitor_v1>       new_shortcuts_inhibitor;
+    Listener<wlr_output_power_v1_set_mode_event>        output_power_set_mode;
     Listener<wlr_input_device>                          new_input;
     Listener<wlr_seat_pointer_request_set_cursor_event> request_set_cursor;
     Listener<wlr_seat_request_set_selection_event>      request_set_selection;
