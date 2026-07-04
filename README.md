@@ -22,13 +22,16 @@ meson setup build
 ninja -C build
 ```
 
-The build pulls `xdg-shell.xml` and `pointer-constraints-unstable-v1.xml` from
-your system's `wayland-protocols` package via pkg-config, and uses the vendored
-`protocols/wlr-layer-shell-unstable-v1.xml` (that protocol isn't in
-wayland-protocols upstream; it ships with wlroots itself, same as dwl's
-`protocols/` directory). `scripts/patch_wlroots_headers.py` patches the system
-wlroots headers into a C++-compatible form before compiling against them — this
-runs automatically as part of the meson build.
+The build pulls `xdg-shell.xml`, `pointer-constraints-unstable-v1.xml`, and
+`tearing-control-v1.xml` from your system's `wayland-protocols` package via
+pkg-config, and uses the vendored `protocols/wlr-layer-shell-unstable-v1.xml`
+(that protocol isn't in wayland-protocols upstream; it ships with wlroots
+itself, same as dwl's `protocols/` directory). Your `wayland-protocols` package
+needs to be new enough to carry `staging/tearing-control/` (it's been there
+since wayland-protocols 1.31) or the meson configure step will fail looking for
+that path. `scripts/patch_wlroots_headers.py` patches the system wlroots headers
+into a C++-compatible form before compiling against them — this runs
+automatically as part of the meson build.
 
 ## Running
 
@@ -78,6 +81,13 @@ wallpaper/etc.; that one doesn't ship a default — see `MISSING.md`.
 - Pointer constraints + relative pointer (`pointer-constraints-unstable-v1`,
   `relative-pointer-unstable-v1`): lock/confine plus relative-motion forwarding,
   what Proton/SDL games need for FPS-style mouselook
+- Tearing control (`wp-tearing-control-v1`): a focused, fullscreen client
+  (Proton/SDL games, mesa's swapchain internals) that's hinted its content is
+  fine being shown with tearing gets an async page-flip instead of a normal
+  vsync'd one, trading a torn frame for lower latency. Never applies to a
+  windowed, backgrounded, or non-hinting client -- see `output.cpp`'s
+  `wantsTearing()` for the exact per-frame check, and `MISSING.md` for what's
+  unverified about it
 - Screen capture (`wlr-screencopy-unstable-v1`): `grim`-style screenshots and
   portal-based screen share/recording (OBS, Discord, `wf-recorder`)
 - Clipboard persistence (`wlr-data-control-unstable-v1`): clipboard managers

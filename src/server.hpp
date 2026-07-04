@@ -43,6 +43,7 @@ struct wlr_pointer_constraints_v1;
 struct wlr_pointer_constraint_v1;
 struct wlr_relative_pointer_manager_v1;
 struct PointerConstraint;
+struct wlr_tearing_control_manager_v1;
 
 enum class CursorMode {
     Passthrough,
@@ -90,6 +91,15 @@ public:
     // these.
     wlr_pointer_constraints_v1*      pointer_constraints      = nullptr;
     wlr_relative_pointer_manager_v1* relative_pointer_manager = nullptr;
+
+    // wp_tearing_control_v1: lets a client (Proton/SDL/mesa's swapchain
+    // internals) hint that a surface's content is fine being shown with
+    // tearing in exchange for lower latency. We only ever query this
+    // per-output at commit time via
+    // wlr_tearing_control_manager_v1_surface_hint_from_surface -- see
+    // Output::handleFrame -- so there are no signals to connect here,
+    // unlike pointer_constraints above.
+    wlr_tearing_control_manager_v1* tearing_control_manager = nullptr;
 
     wlr_scene_tree* layer_tree[4] = {};
     wlr_scene_tree* window_tree   = nullptr;

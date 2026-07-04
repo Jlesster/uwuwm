@@ -32,12 +32,21 @@ a spec, and re-verify against `src/` before trusting an item here for long.
   `wlr_data_control_manager_v1_create(display)` is now called alongside it, so
   cliphist/wl-clip-persist-style clipboard managers can observe and set the
   selection independent of whichever app currently owns it.
+- **Tearing control is wired (`wp-tearing-control-v1`).**
+  `wlr_tearing_control_manager_v1_create(display, 1)` is now called in
+  `Server::setup`, and `Output::handleFrame` asks
+  `wlr_tearing_control_manager_v1_surface_hint_from_surface` every frame for
+  whatever view is focused, fullscreen, and on that output, setting
+  `wlr_output_state.tearing_page_flip` when that surface has hinted async is
+  fine. Falls back to a normal page-flip on the same frame if the backend
+  rejects the tearing commit specifically. Needs `wayland-protocols` >= 1.31
+  (for `staging/tearing-control/`) to build -- see the README's build section.
+  Uncapped-fps games get the latency win; nothing else on the output can tear
+  the desktop out from under itself, since the check only ever passes for the
+  sole focused fullscreen client.
 
 ## Will bite you on your gaming stack specifically
 
-- **No tearing-control (`wp_tearing_control_v1`).** Uncapped-fps older/lighter
-  games will fight vsync/stutter without it. Pointer constraints solved the aim
-  problem; this is the remaining perf-adjacent gap.
 - **No keyboard-shortcuts-inhibit.** A game or remote-input tool that wants to
   grab all keys (e.g. capturing Alt+Tab) has no protocol to ask for that.
 - **No `wlr-output-power-management-v1` / DPMS control.** No way to blank/wake
@@ -79,15 +88,23 @@ above do.
   against a real client (`grim`, `wl-paste -w`/cliphist) yet. Confirm with:
   `grim -o <output> test.png` and `wl-copy hello && cliphist list` (or
   equivalent) after a real session.
+- **Tearing control**, now that it's wired -- unverified against a real hinting
+  client. `wlr_output_state.tearing_page_flip` compiles and the per-frame check
+  is straightforward, but whether the DRM backend actually accepts an async
+  page-flip on your specific GPU/driver, and whether the fallback-to-vsync retry
+  ever actually fires, is untested. A Proton game with `vblank_mode=0` is a
+  reasonable smoke test once you're on a real DRM session --
+  nested-inside-Hyprland won't exercise the tearing page-flip path at all, since
+  that's a KMS/atomic-commit feature the nested Wayland backend doesn't have.
 
 ## Suggested order of attack
 
 1. First real build + boot, nested inside Hyprland, then from a TTY.
 2. Smoke-test session lock, including the crash path, before trusting it on a
    main machine.
-3. Smoke-test screencopy (`grim`) and data-control (a clipboard manager) -- both
-   are newly wired and unverified against a live client.
-4. Tearing-control + keyboard-shortcuts-inhibit -- the remaining gaming-specific
-   gaps.
+3. Smoke-test screencopy (`grim`), data-control (a clipboard manager), and
+   tearing-control (a Proton game with `vblank_mode=0`) -- all three are newly
+   wired and unverified against a live client.
+4. Keyboard-shortcuts-inhibit -- the remaining gaming-specific gap.
 5. DPMS, idle-inhibit, xdg-decoration, foreign-toplevel-management -- round
    these out as they annoy you.

@@ -2,6 +2,7 @@
 
 extern "C" {
 #include <wlr/types/wlr_output.h>
+#include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/util/log.h>
 }
 
@@ -50,6 +51,38 @@ findMode(wlr_output* output, int width, int height, int refresh_mhz) {
         return fallback;
     }
     return best ? best : fallback;
+}
+
+// True only when this output's sole reasonable tearing candidate --
+// the currently-focused view, mapped, fullscreen, actually on this
+// output -- has hinted (via wp_tearing_control_v1) that its content is
+// fine being shown with tearing. Deliberately never true for anything
+// else: a windowed game, a background client that happens to hold a
+// tearing object, or a fullscreen-but-unfocused view (e.g. a fullscreen
+// video paused behind a focused launcher) should never get to tear the
+// whole output out from under whatever else is on screen.
+//
+// Checked fresh every frame rather than cached on the Output like
+// adaptive_sync_on is -- unlike setAdaptiveSync, which does its own
+// dedicated wlr_output_commit_state to avoid an extra desktop-content
+// resync flicker, this rides along on the commit handleFrame() was
+// already about to do, so there's no extra-commit cost to avoid.
+bool wantsTearing(Output& out) {
+    Server& server = out.server;
+    if(!server.tearing_control_manager) { return false; }
+
+    View* focused = server.focused_view;
+    if(!focused || !focused->mapped || focused->output != &out) {
+        return false;
+    }
+    if(!focused->is_fullscreen) { return false; }
+
+    wlr_surface* surface = focused->wlrSurface();
+    if(!surface) { return false; }
+
+    return wlr_tearing_control_manager_v1_surface_hint_from_surface(
+               server.tearing_control_manager, surface) ==
+           WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC;
 }
 
 }  // namespace
@@ -239,11 +272,39 @@ void Output::handleFrame() {
     wlr_scene_output* so = wlr_scene_get_scene_output(server.scene, wlr_output);
     if(!so) { return; }
 
-    if(!wlr_scene_output_commit(so, nullptr)) {
-        // Commit failed (e.g. no DRM master yet). Don't reschedule --
-        // that's what turns one failure into a tight loop. Rely on
-        // session_active_listener to kick scheduling again once the
-        // session is genuinely usable.
+    // Building the state ourselves (instead of the one-call
+    // wlr_scene_output_commit helper) is only so we get a wlr_output_state
+    // to poke tearing_page_flip into before committing -- everything else
+    // here is exactly what that helper does internally.
+    wlr_output_state state;
+    wlr_output_state_init(&state);
+    if(!wlr_scene_output_build_state(so, &state, nullptr)) {
+        wlr_output_state_finish(&state);
+        return;
+    }
+
+    state.tearing_page_flip = wantsTearing(*this);
+
+    bool ok = wlr_output_commit_state(wlr_output, &state);
+    if(!ok && state.tearing_page_flip) {
+        // Per the protocol: the backend may reject a tearing page-flip
+        // (some drivers/multi-GPU setups can't always honor it) even
+        // when everything else about the state was fine. Fall back to a
+        // regular page-flip right away rather than dropping the frame
+        // and waiting on something else to reschedule -- there's no
+        // "tearing didn't work, try again next frame" flag to thread
+        // through session_active_listener, and this output is otherwise
+        // healthy.
+        state.tearing_page_flip = false;
+        ok                      = wlr_output_commit_state(wlr_output, &state);
+    }
+    wlr_output_state_finish(&state);
+
+    if(!ok) {
+        // Commit failed for some other reason (e.g. no DRM master yet).
+        // Don't reschedule -- that's what turns one failure into a tight
+        // loop. Rely on session_active_listener to kick scheduling again
+        // once the session is genuinely usable.
         return;
     }
 

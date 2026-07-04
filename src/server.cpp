@@ -6,6 +6,7 @@ extern "C" {
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_session_lock_v1.h>
+#include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 }
@@ -126,6 +127,17 @@ bool Server::setup() {
     // wl_seat the client already has bound, so it doesn't need `seat` to
     // exist yet at this point in setup.
     wlr_data_control_manager_v1_create(display);
+
+    // wp-tearing-control-v1: lets a client hint that a surface is fine
+    // being shown with tearing (async page-flips) in exchange for lower
+    // latency -- what Proton/SDL/mesa's swapchain internals reach for on
+    // uncapped-fps games. Like screencopy/data-control above this is a
+    // bare global with nothing to feed it at setup time: we don't listen
+    // to new_object/set_hint here, we just ask
+    // wlr_tearing_control_manager_v1_surface_hint_from_surface for a
+    // given surface's current hint at commit time. See
+    // Output::handleFrame.
+    tearing_control_manager = wlr_tearing_control_manager_v1_create(display, 1);
 
     output_layout = wlr_output_layout_create(display);
 
