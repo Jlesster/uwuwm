@@ -8,6 +8,7 @@ extern "C" {
 #include "layershell.hpp"
 #include "layout.hpp"
 #include "server.hpp"
+#include "session_lock.hpp"
 #include "view.hpp"
 
 #include <algorithm>

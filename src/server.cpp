@@ -1,8 +1,10 @@
 #include "server.hpp"
 
 extern "C" {
+#include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
+#include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
@@ -105,6 +107,25 @@ bool Server::setup() {
     compositor = wlr_compositor_create(display, 5, renderer);
     wlr_subcompositor_create(display);
     wlr_data_device_manager_create(display);
+
+    // wlr-screencopy-unstable-v1: grim-style screenshots and OBS/Discord/
+    // wf-recorder-style screen capture. Entirely self-contained -- it
+    // resolves the wl_output a client names against the wl_output global
+    // that Output already exposes, and pulls pixels from whatever's
+    // already in the scene-graph's output buffer, so there's nothing else
+    // for us to feed it or listen to here; creating the global is the
+    // whole integration.
+    wlr_screencopy_manager_v1_create(display);
+
+    // wlr-data-control-unstable-v1: lets a privileged client (cliphist,
+    // wl-clip-persist, etc.) observe and set the seat's selection out of
+    // band from the normal copy/paste path -- this is what lets clipboard
+    // history survive the source app closing, on top of the plain
+    // wlr_data_device_manager clipboard above. Same as screencopy, this is
+    // a bare global: it discovers wlr_seat itself per-client via the
+    // wl_seat the client already has bound, so it doesn't need `seat` to
+    // exist yet at this point in setup.
+    wlr_data_control_manager_v1_create(display);
 
     output_layout = wlr_output_layout_create(display);
 

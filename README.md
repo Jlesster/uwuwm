@@ -45,10 +45,13 @@ From a TTY, for a real DRM/KMS session:
 ./build/uwuwm
 ```
 
-Config lives in `~/.config/uwuwm/rc.lua`, loaded once at startup (no hot-reload
-— edit and restart). `~/.config/uwuwm/autostart.sh`, if present and executable,
-is run once at startup for launching bars/wallpaper/etc. Neither ships a default
-in this repo yet — see "Missing for daily use" below.
+Config lives in `~/.config/uwuwm/rc.lua`, loaded at startup and hot-reloadable
+via `uwu.reload()` (bound to `mod+shift+r` in the shipped `rc.lua`) or
+`pkill -HUP uwuwm` — a broken reload keeps the last-known-good config running
+rather than crashing the session. A working example ships at the repo root; copy
+it to `~/.config/uwuwm/rc.lua` to start. `~/.config/uwuwm/autostart.sh`, if
+present and executable, is run once at startup for launching bars/
+wallpaper/etc.; that one doesn't ship a default — see `MISSING.md`.
 
 ## What's actually implemented
 
@@ -71,8 +74,18 @@ in this repo yet — see "Missing for daily use" below.
 - Session lock (`ext-session-lock-v1`): a lock daemon (swaylock, etc.) can blank
   every output and take exclusive input until it unlocks. Fails safe if the lock
   client crashes without unlocking — see `session_lock.hpp`'s header comment for
-  the exact lifecycle, and `MISSING_FOR_DAILY_USE.md` for what's unverified
-  about it
+  the exact lifecycle, and `MISSING.md` for what's unverified about it
+- Pointer constraints + relative pointer (`pointer-constraints-unstable-v1`,
+  `relative-pointer-unstable-v1`): lock/confine plus relative-motion forwarding,
+  what Proton/SDL games need for FPS-style mouselook
+- Screen capture (`wlr-screencopy-unstable-v1`): `grim`-style screenshots and
+  portal-based screen share/recording (OBS, Discord, `wf-recorder`)
+- Clipboard persistence (`wlr-data-control-unstable-v1`): clipboard managers
+  (cliphist, etc.) can observe and set the selection independent of whichever
+  app currently owns it, on top of the normal copy/paste path
+- rc.lua hot-reload: `uwu.reload()` (bound to `mod+shift+r`) or
+  `pkill -HUP uwuwm` re-run rc.lua from scratch without restarting the
+  compositor; a broken reload keeps the last-known-good config running
 
 ## What's not, and why that's the right scope cut
 
@@ -84,9 +97,6 @@ in this repo yet — see "Missing for daily use" below.
 - **IPC beyond an autostart script.** dwl's stdin-pipe model is more than this
   needed for a first pass; status-bar integration is a clean, additive follow-up
   once you've picked a bar.
-- **rc.lua hot-reload.** Config changes need a restart. Fine for a window
-  manager you don't tweak minute-to-minute; annoying if you're iterating on
-  config itself.
 
 ## A note on correctness
 

@@ -10,6 +10,7 @@ extern "C" {
 
 #include "output.hpp"
 #include "server.hpp"
+#include "view.hpp"
 
 // ----------------------------------------------------------------------------
 // SessionLockSurface
@@ -42,7 +43,8 @@ SessionLockSurface::SessionLockSurface(SessionLock&                 lock,
         static_cast<uint32_t>(output.layout_box.width),
         static_cast<uint32_t>(output.layout_box.height));
 
-    map_listener.connect(&surface->events.map, [this](void*) { handleMap(); });
+    map_listener.connect(&surface->surface->events.map,
+                         [this](void*) { handleMap(); });
     destroy.connect(&surface->events.destroy,
                     [this](void*) { handleDestroy(); });
 }

@@ -1,95 +1,93 @@
 # Missing for daily use
 
-Checked against what's actually wired into `server.cpp` / the meson source list,
-not just what's aspirational in comments. Grouped by how much it'll bite you.
+Checked against what's actually wired into `server.cpp`/`input.cpp`/the meson
+source list, not just what's aspirational in comments or in the README. This
+file has drifted out of sync with the code before -- treat it as a snapshot, not
+a spec, and re-verify against `src/` before trusting an item here for long.
 
-## Will break your workflow immediately
+## Fixed since the last pass
 
-- **No `rc.lua` ships in the repo.** `lua_config.cpp` loads
-  `~/.config/uwuwm/rc.lua` but there's no default/example file anywhere in the
-  tree (`find . -iname '*.lua'` turns up nothing but the C++ loader). Without
-  one you have no keybinds, no monitor rules, no terminal/launcher set — you
-  can't actually use the compositor yet, only build it.
-- **No clipboard persistence across client death.** `wlr_data_device_manager` is
-  created, but there's no `wlr-data-control-v1`, so no external clipboard
-  manager (cliphist, etc.) can hook in, and copied text disappears once the
-  source app closes/exits, which is the default wlroots behavior without a
-  data-control-backed clipboard manager running.
+- **`rc.lua` ships now.** A full example (appearance, keybinds, tag binds,
+  monitor-rule examples) lives at the repo root.
+- **Hot-reload is implemented**, contrary to what the README's "what's not"
+  section still claims. `uwu.reload()` (bound to `mod+shift+r`) and
+  `pkill -HUP uwuwm` both call `LuaConfig::reload()`; a broken rc.lua keeps the
+  last-known-good config running instead of crashing or going dark.
+- **Pointer constraints + relative pointer are wired**, contrary to the previous
+  version of this file. `input.cpp` fully implements
+  `wlr_pointer_constraints_v1` (lock/confine) and forwards relative motion via
+  `wlr_relative_pointer_manager_v1` -- the FPS/Proton mouselook gap is closed.
+- **Session lock now builds.** It was generated against pre-0.20 API shapes and
+  failed to compile (`wlr_session_lock_surface_v1` has no `map` event of its own
+  in 0.20 -- that moved to the underlying `wlr_surface` as part of the unified
+  surface-role model; `session_lock.cpp`/`output.cpp` were also missing two
+  cross-includes for types they dereference). Fixed; still only
+  compile-verified, not runtime-tested -- see "needs a real smoke test" below.
+- **Screencopy is wired.** `wlr_screencopy_manager_v1_create(display)` is now
+  called in `Server::setup`. `grim`, `wf-recorder`, and portal-based screen
+  share/capture (OBS, Discord) should all work against it. It's a self-contained
+  wlroots manager -- no per-frame plumbing needed on our side beyond creating
+  the global.
+- **Clipboard persistence is wired.**
+  `wlr_data_control_manager_v1_create(display)` is now called alongside it, so
+  cliphist/wl-clip-persist-style clipboard managers can observe and set the
+  selection independent of whichever app currently owns it.
 
 ## Will bite you on your gaming stack specifically
 
-- **Pointer constraints are fetched but never used.** The build pulls
-  `pointer-constraints-unstable-v1.xml` and the README even calls it out, but
-  nothing in `input.cpp` binds `wlr_pointer_constraints_v1` or
-  `wlr_relative_pointer_manager_v1`. That protocol pair is what most FPS/3D
-  games under Proton need for mouselook (pointer lock + relative motion) — right
-  now a Proton game grabbing the pointer likely won't get proper relative-motion
-  behavior. This is probably the single most consequential gap for the GTA
-  V/Proton use case specifically, more than XWayland itself (which is done).
+- **No tearing-control (`wp_tearing_control_v1`).** Uncapped-fps older/lighter
+  games will fight vsync/stutter without it. Pointer constraints solved the aim
+  problem; this is the remaining perf-adjacent gap.
+- **No keyboard-shortcuts-inhibit.** A game or remote-input tool that wants to
+  grab all keys (e.g. capturing Alt+Tab) has no protocol to ask for that.
 - **No `wlr-output-power-management-v1` / DPMS control.** No way to blank/wake
-  outputs from software (screen-off timeout, `wlropm`-style tools). Not
-  gaming-specific but you'll notice it fastest when a game's fullscreen state
-  interacts with your monitor's power state.
-- **No screencopy / export-dmabuf.** `wlr_screencopy_manager_v1` isn't
-  implemented, so no `grim`-style screenshots and no screen-share (Discord, OBS)
-  of the compositor. If you stream or clip gameplay, or even just want a
-  bug-report screenshot, there's currently no way to capture the screen at all.
+  outputs from software.
 
-## Quality-of-life you'll want within the first week
+## Quality-of-life you'll want within the first month
 
-- **No idle-inhibit.** `wlr_idle_inhibit_manager_v1` isn't wired up, so
-  fullscreen video/games can't tell an idle daemon (if you run one) to suppress
-  screen-blank/lock. Compounds with the no-DPMS-control gap above.
-- **No xdg-decoration negotiation.** Toplevels aren't told the compositor
-  prefers server-side decoration, so some clients (mostly GTK apps) may draw
-  their own CSD on top of uwuwm's thin border, giving you double chrome on those
-  specific apps.
-- **No virtual-keyboard/virtual-pointer protocols.** Screen-sharing tools and
-  some remote-input/automation utilities rely on these to inject input; without
-  them those tools won't work against uwuwm.
-- **No config hot-reload.** Every `rc.lua` tweak costs a full compositor
-  restart, which under a real DRM/KMS session means your whole graphical session
-  bounces, not just a config reload. Fine occasionally, annoying if you're
-  actively tuning gaps/colors/keybinds.
+- **No idle-inhibit.** Fullscreen video/games can't suppress screen-blank if you
+  run an idle daemon.
+- **No xdg-decoration negotiation.** Some GTK apps may draw their own CSD over
+  uwuwm's thin border.
+- **No virtual-keyboard/virtual-pointer protocols.** Screen-sharing/remote-
+  input-injection tools rely on these; without them, they won't work against
+  uwuwm.
+- **No foreign-toplevel-management.** No window list/app-switcher/waybar- style
+  taskbar integration is possible yet -- nothing exposes toplevel state outside
+  the compositor.
 
 ## Explicitly out of scope, not gaps
 
-Per the README's own scope cuts, these are deliberate and probably fine to leave
-alone: presentation-time consumer code, direct-scanout profiling tooling, and
-any IPC beyond the autostart script (no waybar-style status protocol). None of
-these block daily use the way the items above do.
+Per the README's own scope cuts: presentation-time consumer code, direct-
+scanout profiling tooling, and any IPC beyond the autostart script (no
+waybar-style status protocol). None of these block daily use the way the items
+above do.
 
-## Implemented, but not yet verified against a real build
+## Needs a real smoke test, not just a clean compile
 
-- **Session lock** (`src/session_lock.{hpp,cpp}`). Written to the same design as
-  the rest of the codebase — see that file's header comments for the full
-  lifecycle — but generated without a wlroots-0.20 install to compile against,
-  same caveat as the rest of the tree. The corners most worth checking first if
-  something's off:
-  - `wlr_session_lock_v1_destroy` (used to refuse a second concurrent lock
-    request) is the symbol I recall from this API, but isn't something I could
-    verify against a live 0.20 header.
-  - Whether `wlr_scene_subsurface_tree_create`'s auto-cleanup-on-surface-
-    destroy actually fires before or after `wlr_session_lock_surface_v1`'s own
-    `destroy` event — the implementation assumes "before or simultaneous,"
-    matching how `layershell.cpp` treats `wlr_scene_layer_surface_v1_create`.
-  - What happens, exactly, to a `wlr_session_lock_surface_v1` when its output is
-    unplugged mid-lock — flagged inline in `output.cpp`'s destructor as the
-    first place to look if that ever crashes.
-  - The "client crashed without unlocking" fail-safe path (stay locked, leak the
-    `SessionLock` wrapper, accept a fresh lock client afterward) is exercised by
-    nothing but reasoning — it needs an actual `kill -9` against swaylock to
-    confirm the backdrop really survives.
+- **Session lock** (`src/session_lock.{hpp,cpp}`), now that it builds. Worth
+  checking specifically:
+  - The map-event fix (now listening on `surface->surface->events.map` instead
+    of the nonexistent `surface->events.map`) -- confirm focus handoff to the
+    lock surface actually fires on first real swaylock run.
+  - The "client crashed without unlocking" fail-safe path -- needs an actual
+    `kill -9` against swaylock to confirm the backdrop survives and a second
+    lock client can still supersede it.
+  - What happens to a `wlr_session_lock_surface_v1` when its output is unplugged
+    mid-lock -- flagged inline in `output.cpp`'s destructor.
+- **Screencopy and data-control**, now that they're wired -- neither has run
+  against a real client (`grim`, `wl-paste -w`/cliphist) yet. Confirm with:
+  `grim -o <output> test.png` and `wl-copy hello && cliphist list` (or
+  equivalent) after a real session.
 
 ## Suggested order of attack
 
-1. Write a working `rc.lua` (keybinds, terminal/launcher, at least one monitor
-   rule) — nothing else matters until you can actually drive it.
-2. First real build + smoke test of session lock above, including the crash path
-   — confirm it before trusting it on a main machine.
-3. Pointer constraints + relative pointer — directly serves the Proton/gaming
-   use case that's the whole point of the XWayland work.
-4. Screencopy (`grim` support at minimum) — cheap, high value, and you'll want
-   it the first time something breaks and you want to show someone.
-5. Data-control (clipboard manager support), idle-inhibit, DPMS, xdg-
-   decoration, virtual-keyboard — round these out as they annoy you.
+1. First real build + boot, nested inside Hyprland, then from a TTY.
+2. Smoke-test session lock, including the crash path, before trusting it on a
+   main machine.
+3. Smoke-test screencopy (`grim`) and data-control (a clipboard manager) -- both
+   are newly wired and unverified against a live client.
+4. Tearing-control + keyboard-shortcuts-inhibit -- the remaining gaming-specific
+   gaps.
+5. DPMS, idle-inhibit, xdg-decoration, foreign-toplevel-management -- round
+   these out as they annoy you.
