@@ -2,15 +2,18 @@
 
 extern "C" {
 #include <wlr/types/wlr_data_control_v1.h>
+#include <wlr/types/wlr_foreign_toplevel_management_v1.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
 #include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
+#include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 }
 
+#include "decoration.hpp"
 #include "input.hpp"
 #include "layershell.hpp"
 #include "layout.hpp"
@@ -182,6 +185,30 @@ bool Server::setup() {
         &xdg_shell->events.new_toplevel, [this](wlr_xdg_toplevel* t) {
             views.push_back(std::make_unique<XdgToplevel>(*this, t));
         });
+
+    // xdg-decoration-unstable-v1: lets a client ask whether it should
+    // draw its own titlebar (CSD) or let us draw ours (SSD). We always
+    // force SSD -- see decoration.hpp for the rationale -- so all this
+    // needs is the global plus one signal hookup; ToplevelDecoration
+    // (decoration.{hpp,cpp}) owns the actual per-window negotiation and
+    // is what re-asserts SSD on every request_mode.
+    xdg_decoration_manager = wlr_xdg_decoration_manager_v1_create(display);
+    new_toplevel_decoration.connect(
+        &xdg_decoration_manager->events.new_toplevel_decoration,
+        [this](wlr_xdg_toplevel_decoration_v1* deco) {
+            decoration::newToplevelDecoration(*this, deco);
+        });
+
+    // wlr-foreign-toplevel-management-v1: what a taskbar/dock/app-
+    // switcher (waybar's taskbar module, wlrctl, etc.) uses to see the
+    // window list and ask to activate/minimize/maximize/close/fullscreen
+    // a window it doesn't own. Just the global here -- there's no
+    // client-facing "new toplevel" signal on the manager to wire up;
+    // every wlr_foreign_toplevel_handle_v1 is one we create ourselves,
+    // from View::createForeignToplevel() as each window maps (see
+    // toplevel.cpp/xwayland_view.cpp's handleMap, and view.cpp for the
+    // request_*/destroy wiring).
+    foreign_toplevel_manager = wlr_foreign_toplevel_manager_v1_create(display);
 
     layer_shell = wlr_layer_shell_v1_create(display, 4);
     new_layer_surface.connect(

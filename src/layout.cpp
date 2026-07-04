@@ -18,8 +18,8 @@ int masterCount(Output& /*output*/) { return 1; }
 std::vector<View*> getTiledViews(Output& output) {
     std::vector<View*> tiled;
     for(auto& t : output.server.views) {
-        if(t->mapped && t->output == &output && (t->tags & output.tagset) &&
-           !t->is_floating && !t->is_fullscreen) {
+        if(t->mapped && !t->is_minimized && t->output == &output &&
+           (t->tags & output.tagset) && !t->is_floating && !t->is_fullscreen) {
             tiled.push_back(t.get());
         }
     }
@@ -29,8 +29,8 @@ std::vector<View*> getTiledViews(Output& output) {
 int calcMasterColumnWidth(Output& output, int n_stack, int gap) {
     const wlr_box& area = output.usable_box;
     int master_width = n_stack > 0
-        ? static_cast<int>(area.width * output.master_factor)
-        : area.width;
+                           ? static_cast<int>(area.width * output.master_factor)
+                           : area.width;
     return master_width - gap - (n_stack > 0 ? 0 : gap);
 }
 
@@ -44,7 +44,9 @@ void arrange(Output& output) {
 
     for(auto& t : server.views) {
         if(!t->mapped || t->output != &output) { continue; }
-        wlr_scene_node_set_enabled(&t->scene_tree->node, (t->tags & output.tagset) != 0);
+        wlr_scene_node_set_enabled(
+            &t->scene_tree->node,
+            !t->is_minimized && (t->tags & output.tagset) != 0);
     }
 
     auto tiled = getTiledViews(output);
@@ -54,8 +56,9 @@ void arrange(Output& output) {
 
     const wlr_box& area = output.usable_box;
     int            gap  = server.lua_cfg.settings.gap_px;
-    int n_master = std::min(masterCount(output), static_cast<int>(tiled.size()));
-    int n_stack  = static_cast<int>(tiled.size()) - n_master;
+    int            n_master =
+        std::min(masterCount(output), static_cast<int>(tiled.size()));
+    int n_stack = static_cast<int>(tiled.size()) - n_master;
 
     int master_width = n_stack > 0
                            ? static_cast<int>(area.width * output.master_factor)
@@ -66,8 +69,8 @@ void arrange(Output& output) {
         int y      = area.y + gap;
         for(int i = 0; i < n_master; i++) {
             wlr_box box;
-            box.x = area.x + gap;
-            box.y = y;
+            box.x      = area.x + gap;
+            box.y      = y;
             box.width  = calcMasterColumnWidth(output, n_stack, gap);
             box.height = slot_h;
             tiled[i]->setGeometry(box);
@@ -96,7 +99,7 @@ wlr_box previewTileBox(Output& output) {
     Server& server = output.server;
 
     auto tiled = getTiledViews(output);
-    int count = tiled.size();
+    int  count = tiled.size();
 
     int n_master = std::min(masterCount(output), count + 1);
     int n_stack  = count + 1 - n_master;

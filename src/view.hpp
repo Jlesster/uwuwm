@@ -5,16 +5,23 @@ extern "C" {
 #include <wlr/util/box.h>
 }
 
+#include "listener.hpp"
+
 #include <cstdint>
 #include <ctime>
+#include <memory>
 #include <optional>
 #include <string>
 #include <vector>
-#include <memory>
 
 class Server;
 struct Output;
 struct wlr_surface;
+struct wlr_foreign_toplevel_handle_v1;
+struct wlr_foreign_toplevel_handle_v1_maximized_event;
+struct wlr_foreign_toplevel_handle_v1_minimized_event;
+struct wlr_foreign_toplevel_handle_v1_activated_event;
+struct wlr_foreign_toplevel_handle_v1_fullscreen_event;
 
 // What happens to a View when an in-progress animation finishes. Kept
 // generic rather than "OpenDone/CloseDone" because the same tween drives
@@ -83,6 +90,16 @@ struct View {
     bool is_fullscreen = false;
     bool mapped        = false;
 
+    // Set only via setMinimized() (below), which is what
+    // wlr-foreign-toplevel-management-v1's request_minimize handler
+    // calls -- there's no compositor keybind for this, only a taskbar/
+    // dock asking. A minimized view drops out of tiling (layout.cpp's
+    // getTiledViews/arrange both check this, the same way they already
+    // check tags) and its scene node is disabled, but it keeps its
+    // output/tags/geo untouched so restoring it just re-enables and
+    // re-arranges rather than re-placing it from scratch.
+    bool is_minimized = false;
+
     // X11 override-redirect windows (dropdown menus, tooltips, DND icons):
     // no border, no tiling, no tag membership, no focus-follows-click, and
     // never touched by layout::arrange. Always false for XdgToplevel.
@@ -98,11 +115,17 @@ struct View {
 
     wlr_box floating_geo{};  // remembered geometry to restore on un-fullscreen
 
+    // Non-null only while this view is mapped and managed (never set for
+    // X11 override-redirect windows) -- see createForeignToplevel/
+    // destroyForeignToplevel below.
+    wlr_foreign_toplevel_handle_v1* foreign_toplevel = nullptr;
+
     // --- public API, identical regardless of backing protocol -----------
     void setGeometry(const wlr_box& box);
     void setTags(uint32_t new_tags);
     void setFullscreen(bool fullscreen);
     void setFocused(bool focused);
+    void setMinimized(bool minimized);
     void close();
 
     // Workspace/tag-switch slide helpers -- see Output::setTagset.
@@ -149,6 +172,32 @@ protected:
 
     void updateBorderColor(bool focused, float alpha = 1.0f);
 
+    // Creates this view's wlr_foreign_toplevel_handle_v1 and wires its
+    // request_maximize/request_minimize/request_activate/
+    // request_fullscreen/request_close/destroy signals. Call once, from
+    // handleMap, after mapped/output/tags/title/app_id are all already
+    // set -- those are pushed to the handle at creation time and never
+    // re-read from scratch afterwards (see syncForeignToplevelMeta for
+    // the title/app_id case). No-op if server.foreign_toplevel_manager
+    // is null (shouldn't happen once Server::setup runs, but a unit-style
+    // caller without a real Server shouldn't crash either) or a handle
+    // already exists.
+    void createForeignToplevel();
+
+    // Destroys the wlr_foreign_toplevel_handle_v1 if one exists and
+    // disconnects its listeners. Call from handleUnmap -- a hidden
+    // window has nothing to show a taskbar -- and unconditionally from
+    // ~View as a safety net for any destruction path that skips unmap
+    // (a client that disconnects without a clean unmap/destroy
+    // sequence). Safe to call when foreign_toplevel is already null.
+    void destroyForeignToplevel();
+
+    // Re-pushes title/app_id to an already-created foreign_toplevel
+    // handle. Call from handleSetTitle/handleSetAppId (both backends);
+    // safe -- a no-op -- when foreign_toplevel is null, so call sites
+    // don't need their own guard.
+    void syncForeignToplevelMeta();
+
     // Border rects + content offset + scene_tree position, purely at the
     // scene-graph level -- no client configure. Used both by setGeometry
     // (the real, immediate placement) and by tickAnimation (the
@@ -169,4 +218,18 @@ private:
                    AnimEnd        end);
 
     std::optional<ViewAnimation> anim;
+
+    // Wired up (and torn down) only inside createForeignToplevel/
+    // destroyForeignToplevel -- these connect to foreign_toplevel's
+    // signals, which don't exist until that handle does.
+    Listener<wlr_foreign_toplevel_handle_v1_maximized_event>
+        ft_request_maximize;
+    Listener<wlr_foreign_toplevel_handle_v1_minimized_event>
+        ft_request_minimize;
+    Listener<wlr_foreign_toplevel_handle_v1_activated_event>
+        ft_request_activate;
+    Listener<wlr_foreign_toplevel_handle_v1_fullscreen_event>
+                 ft_request_fullscreen;
+    VoidListener ft_request_close;
+    VoidListener ft_destroy;
 };

@@ -107,6 +107,7 @@ src = files(
     'src/xwayland_view.cpp',
     'src/view.cpp',
     'src/session_lock.cpp',
+    'src/decoration.cpp',
     'src/popup.cpp',
     'src/input.cpp',
     'src/layershell.cpp',

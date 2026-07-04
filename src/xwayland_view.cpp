@@ -24,14 +24,16 @@ XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
     scene_tree            = wlr_scene_tree_create(server.window_tree);
     scene_tree->node.data = this;
 
-    border_tree = wlr_scene_tree_create(scene_tree);
+    border_tree    = wlr_scene_tree_create(scene_tree);
     float color[4] = {
         ((server.lua_cfg.settings.border_color_inactive >> 24) & 0xff) / 255.0f,
         ((server.lua_cfg.settings.border_color_inactive >> 16) & 0xff) / 255.0f,
         ((server.lua_cfg.settings.border_color_inactive >> 8) & 0xff) / 255.0f,
         (server.lua_cfg.settings.border_color_inactive & 0xff) / 255.0f,
     };
-    for(auto& rect : border_rects) { rect = wlr_scene_rect_create(border_tree, 0, 0, color); }
+    for(auto& rect : border_rects) {
+        rect = wlr_scene_rect_create(border_tree, 0, 0, color);
+    }
 
     // Plain empty tree so `content_tree`'s field type matches XdgToplevel
     // (a wlr_scene_tree*) -- the actual surface buffer only exists once
@@ -48,7 +50,8 @@ XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
                       [this](void*) { handleAssociate(); });
     dissociate.connect(&xsurface->events.dissociate,
                        [this](void*) { handleDissociate(); });
-    destroy.connect(&xsurface->events.destroy, [this](void*) { handleDestroy(); });
+    destroy.connect(&xsurface->events.destroy,
+                    [this](void*) { handleDestroy(); });
     request_configure.connect(
         &xsurface->events.request_configure,
         [this](wlr_xwayland_surface_configure_event* event) {
@@ -56,13 +59,16 @@ XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
         });
     request_move.connect(&xsurface->events.request_move,
                          [this](void*) { handleRequestMove(); });
-    request_resize.connect(
-        &xsurface->events.request_resize,
-        [this](wlr_xwayland_resize_event* event) { handleRequestResize(event); });
+    request_resize.connect(&xsurface->events.request_resize,
+                           [this](wlr_xwayland_resize_event* event) {
+                               handleRequestResize(event);
+                           });
     request_fullscreen.connect(&xsurface->events.request_fullscreen,
                                [this](void*) { handleRequestFullscreen(); });
-    set_title.connect(&xsurface->events.set_title, [this](void*) { handleSetTitle(); });
-    set_class.connect(&xsurface->events.set_class, [this](void*) { handleSetClass(); });
+    set_title.connect(&xsurface->events.set_title,
+                      [this](void*) { handleSetTitle(); });
+    set_class.connect(&xsurface->events.set_class,
+                      [this](void*) { handleSetClass(); });
 }
 
 // View::~View() tears down scene_tree; nothing X11-specific left to do.
@@ -71,8 +77,10 @@ XWaylandView::~XWaylandView() = default;
 void XWaylandView::handleAssociate() {
     // Only from this point does xsurface->surface exist -- hook the
     // surface-level map/unmap and put its content into our tree.
-    map_listener.connect(&xsurface->surface->events.map, [this](void*) { handleMap(); });
-    unmap.connect(&xsurface->surface->events.unmap, [this](void*) { handleUnmap(); });
+    map_listener.connect(&xsurface->surface->events.map,
+                         [this](void*) { handleMap(); });
+    unmap.connect(&xsurface->surface->events.unmap,
+                  [this](void*) { handleUnmap(); });
     wlr_scene_surface_create(content_tree, xsurface->surface);
 }
 
@@ -93,7 +101,8 @@ void XWaylandView::handleMap() {
         // where X11 put it and let it render above everything else, same
         // as every other compositor treats override-redirect windows.
         wlr_scene_node_set_enabled(&border_tree->node, false);
-        geo = wlr_box{xsurface->x, xsurface->y, xsurface->width, xsurface->height};
+        geo = wlr_box{
+            xsurface->x, xsurface->y, xsurface->width, xsurface->height};
         wlr_scene_node_set_position(&scene_tree->node, geo.x, geo.y);
         wlr_scene_node_raise_to_top(&scene_tree->node);
         return;
@@ -129,6 +138,7 @@ void XWaylandView::handleMap() {
         setGeometry(box);
     }
 
+    createForeignToplevel();
     server.focusView(this);
     playOpenAnimation();
 }
@@ -138,8 +148,10 @@ void XWaylandView::handleUnmap() {
     wlr_scene_node_set_enabled(&content_tree->node, false);
 
     if(unmanaged) { return; }
+    destroyForeignToplevel();
 
-    if(server.cursor_mode != CursorMode::Passthrough && server.grabbed_view == this) {
+    if(server.cursor_mode != CursorMode::Passthrough &&
+       server.grabbed_view == this) {
         input::resetCursorMode(server);
     }
 
@@ -166,7 +178,8 @@ void XWaylandView::handleDestroy() {
         [this](const std::unique_ptr<View>& v) { return v.get() == this; });
 }
 
-void XWaylandView::handleRequestConfigure(wlr_xwayland_surface_configure_event* event) {
+void XWaylandView::handleRequestConfigure(
+    wlr_xwayland_surface_configure_event* event) {
     // Not yet mapped, unmanaged (override-redirect), or floating: X11
     // clients are used to placing themselves, and we let them -- same as
     // dwl/sway do. A tiled, mapped, managed window ignores this; the
@@ -185,8 +198,10 @@ void XWaylandView::handleRequestConfigure(wlr_xwayland_surface_configure_event* 
 
     if(mapped && !unmanaged) {
         int     b = server.lua_cfg.settings.border_px;
-        wlr_box box{event->x - b, event->y - b, event->width + 2 * b,
-                   event->height + 2 * b};
+        wlr_box box{event->x - b,
+                    event->y - b,
+                    event->width + 2 * b,
+                    event->height + 2 * b};
         geo = box;
         applyBoxToScene(box);
     }
@@ -204,10 +219,12 @@ void XWaylandView::handleRequestFullscreen() {
 
 void XWaylandView::handleSetTitle() {
     title = xsurface->title ? xsurface->title : "";
+    syncForeignToplevelMeta();
 }
 
 void XWaylandView::handleSetClass() {
     app_id = xsurface->class_ ? xsurface->class_ : "";
+    syncForeignToplevelMeta();
 }
 
 void XWaylandView::configureBackend(const wlr_box& box) {

@@ -1,12 +1,15 @@
 #include "view.hpp"
+
 #include "popup.hpp"
 
 extern "C" {
 #include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_foreign_toplevel_management_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 }
 
+#include "input.hpp"
 #include "layout.hpp"
 #include "output.hpp"
 #include "server.hpp"
@@ -28,6 +31,12 @@ void colorToRgba(uint32_t packed, float out[4]) {
 View::View(Server& server) : server(server) {}
 
 View::~View() {
+    // Safety net for any destruction path that skips handleUnmap (a
+    // client that disconnects uncleanly) -- handleUnmap already calls
+    // this in the normal case, and it's a no-op when foreign_toplevel is
+    // already null, so there's no double-destroy risk either way.
+    destroyForeignToplevel();
+
     if(server.focused_view == this) { server.focused_view = nullptr; }
     if(server.grabbed_view == this) {
         server.grabbed_view = nullptr;
@@ -65,7 +74,8 @@ void View::setGeometry(const wlr_box& box) {
 
 void View::setTags(uint32_t new_tags) {
     tags = new_tags == 0 ? tags : new_tags;
-    wlr_scene_node_set_enabled(&scene_tree->node, output && (tags & output->tagset));
+    wlr_scene_node_set_enabled(&scene_tree->node,
+                               output && (tags & output->tagset));
     if(output) { layout::arrange(*output); }
 }
 
@@ -92,6 +102,16 @@ void View::setFullscreen(bool fullscreen) {
 
     output->fullscreen_active = fullscreen && (server.focused_view == this);
     output->updateAdaptiveSync();
+
+    // Keep any taskbar/dock watching via foreign-toplevel-management in
+    // sync regardless of who triggered this -- the xdg/xwayland client
+    // itself (request_fullscreen), or a foreign-toplevel client's own
+    // request_fullscreen (View::createForeignToplevel's handler, which
+    // calls back into this same setFullscreen).
+    if(foreign_toplevel) {
+        wlr_foreign_toplevel_handle_v1_set_fullscreen(foreign_toplevel,
+                                                      fullscreen);
+    }
 }
 
 void View::updateBorderColor(bool focused, float alpha) {
@@ -106,6 +126,137 @@ void View::updateBorderColor(bool focused, float alpha) {
 void View::setFocused(bool focused) {
     updateBorderColor(focused);
     activateBackend(focused);
+    if(foreign_toplevel) {
+        wlr_foreign_toplevel_handle_v1_set_activated(foreign_toplevel, focused);
+    }
+}
+
+void View::setMinimized(bool minimized) {
+    if(is_minimized == minimized) { return; }
+    is_minimized = minimized;
+
+    if(foreign_toplevel) {
+        wlr_foreign_toplevel_handle_v1_set_minimized(foreign_toplevel,
+                                                     minimized);
+    }
+
+    wlr_scene_node_set_enabled(&scene_tree->node,
+                               !minimized && output && (tags & output->tagset));
+
+    if(minimized) {
+        // Same grab-release guard handleUnmap uses -- a client asking to
+        // minimize mid-drag shouldn't leave the compositor's move/resize
+        // state pointing at a now-hidden view.
+        if(server.cursor_mode != CursorMode::Passthrough &&
+           server.grabbed_view == this) {
+            input::resetCursorMode(server);
+        }
+        if(server.focused_view == this) {
+            server.focused_view = nullptr;
+            View* next          = nullptr;
+            if(output) {
+                for(auto& v : server.views) {
+                    if(v.get() != this && v->mapped && !v->is_minimized &&
+                       v->output == output && (v->tags & output->tagset)) {
+                        next = v.get();
+                        break;
+                    }
+                }
+            }
+            server.focusView(next);
+        }
+    } else {
+        server.focusView(this);
+    }
+
+    if(output) { layout::arrange(*output); }
+}
+
+void View::createForeignToplevel() {
+    if(foreign_toplevel || !server.foreign_toplevel_manager) { return; }
+
+    foreign_toplevel =
+        wlr_foreign_toplevel_handle_v1_create(server.foreign_toplevel_manager);
+    wlr_foreign_toplevel_handle_v1_set_title(foreign_toplevel, title.c_str());
+    wlr_foreign_toplevel_handle_v1_set_app_id(foreign_toplevel, app_id.c_str());
+    wlr_foreign_toplevel_handle_v1_set_fullscreen(foreign_toplevel,
+                                                  is_fullscreen);
+    wlr_foreign_toplevel_handle_v1_set_minimized(foreign_toplevel,
+                                                 is_minimized);
+    wlr_foreign_toplevel_handle_v1_set_activated(foreign_toplevel,
+                                                 server.focused_view == this);
+    if(output) {
+        wlr_foreign_toplevel_handle_v1_output_enter(foreign_toplevel,
+                                                    output->wlr_output);
+    }
+
+    ft_request_maximize.connect(
+        &foreign_toplevel->events.request_maximize,
+        [this](wlr_foreign_toplevel_handle_v1_maximized_event* event) {
+            // Same position as XdgToplevel::handleRequestMaximize: no
+            // distinct maximize state exists here -- tiling already
+            // gives a lone window on a tag a maximized-equivalent size
+            // -- so just echo the requested state back instead of
+            // leaving a taskbar's maximize toggle looking stuck.
+            wlr_foreign_toplevel_handle_v1_set_maximized(foreign_toplevel,
+                                                         event->maximized);
+        });
+    ft_request_minimize.connect(
+        &foreign_toplevel->events.request_minimize,
+        [this](wlr_foreign_toplevel_handle_v1_minimized_event* event) {
+            setMinimized(event->minimized);
+        });
+    ft_request_activate.connect(
+        &foreign_toplevel->events.request_activate,
+        [this](wlr_foreign_toplevel_handle_v1_activated_event*) {
+            // Ignore ->seat -- this compositor only ever has one seat
+            // ("seat0", see Server::setup), so there's nothing to
+            // disambiguate.
+            if(is_minimized) { setMinimized(false); }
+            server.focusView(this);
+        });
+    ft_request_fullscreen.connect(
+        &foreign_toplevel->events.request_fullscreen,
+        [this](wlr_foreign_toplevel_handle_v1_fullscreen_event* event) {
+            // Ignore ->output -- we don't support requesting fullscreen
+            // on a specific *other* output via this path, only toggling
+            // it on the view's current one, same as request_fullscreen
+            // from the client itself.
+            setFullscreen(event->fullscreen);
+        });
+    ft_request_close.connect(&foreign_toplevel->events.request_close,
+                             [this](void*) { close(); });
+    // events.destroy fires before wlroots frees the handle, whether that
+    // free was triggered by us (destroyForeignToplevel calling
+    // wlr_foreign_toplevel_handle_v1_destroy) or, in principle, by
+    // something else -- listen unconditionally rather than assume only
+    // our own call can ever trigger it. Disconnecting each listener
+    // during its own signal's emission is the standard, supported
+    // wl_signal_emit_mutable pattern for exactly this "clean up as I'm
+    // torn down" case.
+    ft_destroy.connect(&foreign_toplevel->events.destroy, [this](void*) {
+        foreign_toplevel = nullptr;
+        ft_request_maximize.disconnect();
+        ft_request_minimize.disconnect();
+        ft_request_activate.disconnect();
+        ft_request_fullscreen.disconnect();
+        ft_request_close.disconnect();
+        ft_destroy.disconnect();
+    });
+}
+
+void View::destroyForeignToplevel() {
+    if(!foreign_toplevel) { return; }
+    // Triggers the events.destroy handler above, which nulls
+    // foreign_toplevel out and disconnects everything -- nothing left to
+    // do here afterwards.
+    wlr_foreign_toplevel_handle_v1_destroy(foreign_toplevel);
+}
+
+void View::syncForeignToplevelMeta() {
+    if(!foreign_toplevel) { return; }
+    wlr_foreign_toplevel_handle_v1_set_title(foreign_toplevel, title.c_str());
+    wlr_foreign_toplevel_handle_v1_set_app_id(foreign_toplevel, app_id.c_str());
 }
 
 void View::close() {
@@ -152,8 +303,8 @@ void View::startAnim(const wlr_box& from,
                      float          op_to,
                      AnimEnd        end) {
     anim.emplace();
-    anim->from        = from;
-    anim->to          = to;
+    anim->from         = from;
+    anim->to           = to;
     anim->opacity_from = op_from;
     anim->opacity_to   = op_to;
     anim->duration_ms  = server.lua_cfg.settings.anim_duration_ms;
@@ -202,19 +353,20 @@ void View::tickAnimation(const timespec& now) {
 
     double elapsed_ms = (now.tv_sec - anim->start.tv_sec) * 1000.0 +
                         (now.tv_nsec - anim->start.tv_nsec) / 1e6;
-    double t = std::clamp(elapsed_ms / std::max(1, anim->duration_ms), 0.0, 1.0);
+    double t =
+        std::clamp(elapsed_ms / std::max(1, anim->duration_ms), 0.0, 1.0);
     double e = 1.0 - std::pow(1.0 - t, 3.0);  // ease-out cubic
 
     wlr_box cur;
-    cur.x      = anim->from.x + static_cast<int>((anim->to.x - anim->from.x) * e);
-    cur.y      = anim->from.y + static_cast<int>((anim->to.y - anim->from.y) * e);
+    cur.x = anim->from.x + static_cast<int>((anim->to.x - anim->from.x) * e);
+    cur.y = anim->from.y + static_cast<int>((anim->to.y - anim->from.y) * e);
     cur.width  = anim->from.width +
-                static_cast<int>((anim->to.width - anim->from.width) * e);
+                 static_cast<int>((anim->to.width - anim->from.width) * e);
     cur.height = anim->from.height +
-                static_cast<int>((anim->to.height - anim->from.height) * e);
+                 static_cast<int>((anim->to.height - anim->from.height) * e);
     applyBoxToScene(cur);
-    setOpacity(static_cast<float>(
-        anim->opacity_from + (anim->opacity_to - anim->opacity_from) * e));
+    setOpacity(static_cast<float>(anim->opacity_from +
+                                  (anim->opacity_to - anim->opacity_from) * e));
 
     if(t >= 1.0) {
         AnimEnd end           = anim->on_finish;

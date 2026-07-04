@@ -44,6 +44,10 @@ struct wlr_pointer_constraint_v1;
 struct wlr_relative_pointer_manager_v1;
 struct PointerConstraint;
 struct wlr_tearing_control_manager_v1;
+struct wlr_xdg_decoration_manager_v1;
+struct wlr_xdg_toplevel_decoration_v1;
+struct ToplevelDecoration;
+struct wlr_foreign_toplevel_manager_v1;
 
 enum class CursorMode {
     Passthrough,
@@ -101,6 +105,24 @@ public:
     // unlike pointer_constraints above.
     wlr_tearing_control_manager_v1* tearing_control_manager = nullptr;
 
+    // xdg-decoration-unstable-v1: lets a client ask whether it should draw
+    // its own titlebar (CSD) or let us draw ours (SSD). We always force
+    // SSD -- see decoration.hpp for why -- via the per-decoration
+    // ToplevelDecoration wrapper owned by toplevel_decorations below.
+    wlr_xdg_decoration_manager_v1* xdg_decoration_manager = nullptr;
+
+    // wlr-foreign-toplevel-management-v1: the protocol a taskbar/dock/
+    // app-switcher (waybar's taskbar module, etc.) uses to see the window
+    // list and ask to activate/minimize/maximize/close/fullscreen a
+    // window it doesn't itself own. Unlike screencopy/data-control/
+    // tearing-control above, this isn't a bare global -- we own one
+    // wlr_foreign_toplevel_handle_v1 per mapped, managed View, created
+    // and destroyed by View itself (see view.hpp's createForeignToplevel/
+    // destroyForeignToplevel). The manager has no client-facing "new
+    // toplevel" signal to wire here; toplevel handles only ever come from
+    // our own wlr_foreign_toplevel_handle_v1_create() calls.
+    wlr_foreign_toplevel_manager_v1* foreign_toplevel_manager = nullptr;
+
     wlr_scene_tree* layer_tree[4] = {};
     wlr_scene_tree* window_tree   = nullptr;
 
@@ -141,6 +163,12 @@ public:
     // need to arbitrate here).
     PointerConstraint* active_constraint = nullptr;
 
+    // One entry per live zxdg_toplevel_decoration_v1 object a client has
+    // open, regardless of which View (or no View yet, if the client
+    // hasn't attached a role surface) it's associated with -- see
+    // decoration.hpp.
+    std::list<std::unique_ptr<ToplevelDecoration>> toplevel_decorations;
+
     Output* focused_output = nullptr;
     View*   focused_view   = nullptr;
 
@@ -176,6 +204,7 @@ private:
     VoidListener                                        xwayland_ready;
     Listener<wlr_session_lock_v1>                       new_session_lock;
     Listener<wlr_pointer_constraint_v1>                 new_pointer_constraint;
+    Listener<wlr_xdg_toplevel_decoration_v1>            new_toplevel_decoration;
     Listener<wlr_input_device>                          new_input;
     Listener<wlr_seat_pointer_request_set_cursor_event> request_set_cursor;
     Listener<wlr_seat_request_set_selection_event>      request_set_selection;

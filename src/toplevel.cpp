@@ -1,4 +1,5 @@
 #include "toplevel.hpp"
+
 #include "utils.hpp"
 
 extern "C" {
@@ -27,7 +28,9 @@ XdgToplevel::XdgToplevel(Server& server, wlr_xdg_toplevel* xdg_toplevel)
     border_tree = wlr_scene_tree_create(scene_tree);
     float color[4];
     utils::colorToRgba(server.lua_cfg.settings.border_color_inactive, color);
-    for(auto& rect : border_rects) { rect = wlr_scene_rect_create(border_tree, 0, 0, color); }
+    for(auto& rect : border_rects) {
+        rect = wlr_scene_rect_create(border_tree, 0, 0, color);
+    }
 
     content_tree = wlr_scene_xdg_surface_create(scene_tree, xdg_toplevel->base);
     wlr_scene_node_set_position(&content_tree->node, border_px, border_px);
@@ -97,12 +100,14 @@ void XdgToplevel::handleMap() {
         setGeometry(box);
     }
 
+    createForeignToplevel();
     server.focusView(this);
     playOpenAnimation();
 }
 
 void XdgToplevel::handleUnmap() {
     mapped = false;
+    destroyForeignToplevel();
 
     if(server.cursor_mode != CursorMode::Passthrough &&
        server.grabbed_view == this) {
@@ -134,7 +139,8 @@ void XdgToplevel::handleNewPopup(wlr_xdg_popup* popup) {
     // coordinate origin the client's popup geometry is expressed
     // relative to, and it already carries the border-width offset, so
     // popups line up correctly regardless of border thickness.
-    auto p = std::make_unique<Popup>(server, popup, content_tree, this, nullptr);
+    auto p =
+        std::make_unique<Popup>(server, popup, content_tree, this, nullptr);
     popups.push_back(std::move(p));
 }
 
@@ -203,8 +209,10 @@ void XdgToplevel::handleRequestFullscreen() {
 
 void XdgToplevel::handleSetTitle() {
     title = xdg_toplevel->title ? xdg_toplevel->title : "";
+    syncForeignToplevelMeta();
 }
 
 void XdgToplevel::handleSetAppId() {
     app_id = xdg_toplevel->app_id ? xdg_toplevel->app_id : "";
+    syncForeignToplevelMeta();
 }
