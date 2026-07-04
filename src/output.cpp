@@ -1,11 +1,13 @@
 #include "output.hpp"
 
 extern "C" {
+#include <wlr/types/wlr_content_type_v1.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
 #include <wlr/util/log.h>
 }
 
+#include "idle.hpp"
 #include "layershell.hpp"
 #include "layout.hpp"
 #include "server.hpp"
@@ -83,6 +85,34 @@ bool wantsTearing(Output& out) {
     return wlr_tearing_control_manager_v1_surface_hint_from_surface(
                server.tearing_control_manager, surface) ==
            WP_TEARING_CONTROL_V1_PRESENTATION_HINT_ASYNC;
+}
+
+// True when the currently-focused view on this output has hinted (via
+// wp_content_type_v1) that its surface is CONTENT_TYPE_GAME. Used by
+// Output::updateAdaptiveSync as a second, protocol-level path into
+// adaptive sync alongside the pre-existing "exactly one visible window,
+// and it's focused" heuristic below -- a windowed game sharing a tag with
+// e.g. a chat client shouldn't lose VRR just because it isn't alone.
+// Deliberately only ever looks at the focused view, same reasoning
+// wantsTearing above uses for fullscreen: an unfocused/backgrounded
+// client hinting content-type=game shouldn't be able to pull every other
+// output-bound client into tearing-prone adaptive-sync territory on its
+// behalf.
+bool focusedWantsGameSync(Output& out) {
+    Server& server = out.server;
+    if(!server.content_type_manager) { return false; }
+
+    View* focused = server.focused_view;
+    if(!focused || !focused->mapped || focused->output != &out) {
+        return false;
+    }
+
+    wlr_surface* surface = focused->wlrSurface();
+    if(!surface) { return false; }
+
+    return wlr_surface_get_content_type_v1(server.content_type_manager,
+                                           surface) ==
+           WP_CONTENT_TYPE_V1_TYPE_GAME;
 }
 
 }  // namespace
@@ -390,7 +420,11 @@ void Output::updateAdaptiveSync() {
         if(++count > 1) { break; }
         only = v.get();
     }
-    setAdaptiveSync(count == 1 && server.focused_view == only);
+
+    bool sync_worthy = count == 1 && server.focused_view == only;
+    if(!sync_worthy) { sync_worthy = focusedWantsGameSync(*this); }
+
+    setAdaptiveSync(sync_worthy);
 }
 
 void Output::setTagset(uint32_t new_tagset) {
@@ -399,6 +433,7 @@ void Output::setTagset(uint32_t new_tagset) {
     if(!server.lua_cfg.settings.anim_enabled) {
         tagset = new_tagset;
         layout::arrange(*this);
+        idle::updateInhibitState(server);
         return;
     }
 
@@ -430,6 +465,7 @@ void Output::setTagset(uint32_t new_tagset) {
             v->playSlideIn(dx, 0);
         }
     }
+    idle::updateInhibitState(server);
 }
 
 void Output::applyRule(const MonitorRule& rule) {

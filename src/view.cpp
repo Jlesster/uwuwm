@@ -9,6 +9,7 @@ extern "C" {
 #include <wlr/types/wlr_seat.h>
 }
 
+#include "idle.hpp"
 #include "input.hpp"
 #include "layout.hpp"
 #include "output.hpp"
@@ -170,6 +171,7 @@ void View::setMinimized(bool minimized) {
     }
 
     if(output) { layout::arrange(*output); }
+    idle::updateInhibitState(server);
 }
 
 void View::createForeignToplevel() {

@@ -52,6 +52,15 @@ struct wlr_keyboard_shortcuts_inhibit_manager_v1;
 struct wlr_keyboard_shortcuts_inhibitor_v1;
 struct wlr_output_power_manager_v1;
 struct wlr_output_power_v1_set_mode_event;
+struct wlr_idle_notifier_v1;
+struct wlr_idle_inhibit_manager_v1;
+struct wlr_idle_inhibitor_v1;
+struct IdleInhibitor;
+struct wlr_xdg_activation_v1;
+struct wlr_xdg_activation_v1_request_activate_event;
+struct wlr_cursor_shape_manager_v1;
+struct wlr_cursor_shape_manager_v1_request_set_shape_event;
+struct wlr_content_type_manager_v1;
 
 enum class CursorMode {
     Passthrough,
@@ -148,6 +157,51 @@ public:
     // same mechanism Output::applyRule uses for uwu.monitor.set().
     wlr_output_power_manager_v1* output_power_manager = nullptr;
 
+    // ext-idle-notify-v1: what an idle daemon (swayidle) binds to find
+    // out "no input for N seconds" at all -- fed from every real input
+    // event via wlr_idle_notifier_v1_notify_activity, called from
+    // Keyboard::handleKey and all four cursor signals in input.cpp.
+    // idle-inhibit-unstable-v1 (the pair below) is what temporarily mutes
+    // that timer while a client that shouldn't be interrupted -- a video,
+    // a game -- is visible; neither protocol is useful daily-driven
+    // without the other, so they're wired up together. See idle.hpp for
+    // the actual inhibit-state bookkeeping.
+    wlr_idle_notifier_v1*        idle_notifier        = nullptr;
+    wlr_idle_inhibit_manager_v1* idle_inhibit_manager = nullptr;
+
+    // One entry per live zwp_idle_inhibitor_v1 a client currently holds
+    // open, regardless of whether its surface is presently visible --
+    // see idle.hpp's IdleInhibitor / idle::updateInhibitState.
+    std::list<std::unique_ptr<IdleInhibitor>> idle_inhibitors;
+
+    // xdg-activation-v1: lets one client (a launcher, a completed
+    // background task, an xdg-desktop-portal window-activation request)
+    // ask to focus a *different* client's surface, with wlroots handling
+    // the token issue/verify dance itself -- request_activate only ever
+    // fires once a client presents a token it was actually handed. We
+    // just resolve event->surface to a managed View and route it through
+    // the same Server::focusView every other focus path already uses
+    // (session_locked, etc. all still apply). See Server::setup.
+    wlr_xdg_activation_v1* xdg_activation = nullptr;
+
+    // wp-cursor-shape-v1: lets a client name a cursor shape ("text",
+    // "grab", "wait", ...) instead of drawing/loading its own xcursor
+    // theme -- newer GTK4/Qt6-era toolkits increasingly assume this is
+    // available. wlr_cursor_shape_v1_name() maps straight onto the same
+    // xcursor names cursor_mgr already knows how to load, so this reuses
+    // the exact wlr_cursor_set_xcursor call path request_set_cursor
+    // above uses; no new cursor-loading logic needed.
+    wlr_cursor_shape_manager_v1* cursor_shape_manager = nullptr;
+
+    // wp-content-type-v1: lets a client hint what kind of content a
+    // surface holds (game/video/photo/none). Bare global, nothing to
+    // listen for here -- like tearing-control, we only ever query it
+    // per-surface on demand (wlr_surface_get_content_type_v1), from
+    // Output::updateAdaptiveSync, so a focused client's own "I'm a game"
+    // hint can pull in adaptive sync the same way the existing
+    // exactly-one-visible-window heuristic already does.
+    wlr_content_type_manager_v1* content_type_manager = nullptr;
+
     wlr_scene_tree* layer_tree[4] = {};
     wlr_scene_tree* window_tree   = nullptr;
 
@@ -222,17 +276,22 @@ private:
     bool setup();
     void spawnAutostart();
 
-    Listener<wlr_output>                                new_output;
-    Listener<wlr_xdg_toplevel>                          new_xdg_toplevel;
-    Listener<wlr_layer_surface_v1>                      new_layer_surface;
-    Listener<wlr_xwayland_surface>                      new_xwayland_surface;
-    VoidListener                                        xwayland_ready;
-    Listener<wlr_session_lock_v1>                       new_session_lock;
-    Listener<wlr_pointer_constraint_v1>                 new_pointer_constraint;
-    Listener<wlr_xdg_toplevel_decoration_v1>            new_toplevel_decoration;
-    Listener<wlr_keyboard_shortcuts_inhibitor_v1>       new_shortcuts_inhibitor;
-    Listener<wlr_output_power_v1_set_mode_event>        output_power_set_mode;
-    Listener<wlr_input_device>                          new_input;
+    Listener<wlr_output>                          new_output;
+    Listener<wlr_xdg_toplevel>                    new_xdg_toplevel;
+    Listener<wlr_layer_surface_v1>                new_layer_surface;
+    Listener<wlr_xwayland_surface>                new_xwayland_surface;
+    VoidListener                                  xwayland_ready;
+    Listener<wlr_session_lock_v1>                 new_session_lock;
+    Listener<wlr_pointer_constraint_v1>           new_pointer_constraint;
+    Listener<wlr_xdg_toplevel_decoration_v1>      new_toplevel_decoration;
+    Listener<wlr_keyboard_shortcuts_inhibitor_v1> new_shortcuts_inhibitor;
+    Listener<wlr_output_power_v1_set_mode_event>  output_power_set_mode;
+    Listener<wlr_idle_inhibitor_v1>               new_idle_inhibitor;
+    Listener<wlr_xdg_activation_v1_request_activate_event>
+        new_xdg_activation_request;
+    Listener<wlr_cursor_shape_manager_v1_request_set_shape_event>
+                               request_set_cursor_shape;
+    Listener<wlr_input_device> new_input;
     Listener<wlr_seat_pointer_request_set_cursor_event> request_set_cursor;
     Listener<wlr_seat_request_set_selection_event>      request_set_selection;
     VoidListener                                        session_active_listener;

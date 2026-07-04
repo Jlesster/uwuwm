@@ -8,6 +8,7 @@ extern "C" {
 #include <wlr/util/log.h>
 }
 
+#include "idle.hpp"
 #include "input.hpp"
 #include "layout.hpp"
 #include "output.hpp"
@@ -103,11 +104,17 @@ void XdgToplevel::handleMap() {
     createForeignToplevel();
     server.focusView(this);
     playOpenAnimation();
+
+    // A newly-mapped surface might be the one an existing
+    // zwp_idle_inhibitor_v1 was created against before it ever mapped
+    // (e.g. a game requesting the inhibitor from its splash screen).
+    idle::updateInhibitState(server);
 }
 
 void XdgToplevel::handleUnmap() {
     mapped = false;
     destroyForeignToplevel();
+    idle::updateInhibitState(server);
 
     if(server.cursor_mode != CursorMode::Passthrough &&
        server.grabbed_view == this) {

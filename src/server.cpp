@@ -1,8 +1,12 @@
 #include "server.hpp"
 
 extern "C" {
+#include <wlr/types/wlr_content_type_v1.h>
+#include <wlr/types/wlr_cursor_shape_v1.h>
 #include <wlr/types/wlr_data_control_v1.h>
 #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
+#include <wlr/types/wlr_idle_inhibit_v1.h>
+#include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
 #include <wlr/types/wlr_output_power_management_v1.h>
 #include <wlr/types/wlr_pointer_constraints_v1.h>
@@ -10,12 +14,14 @@ extern "C" {
 #include <wlr/types/wlr_screencopy_v1.h>
 #include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_tearing_control_v1.h>
+#include <wlr/types/wlr_xdg_activation_v1.h>
 #include <wlr/types/wlr_xdg_decoration_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
 }
 
 #include "decoration.hpp"
+#include "idle.hpp"
 #include "input.hpp"
 #include "layershell.hpp"
 #include "layout.hpp"
@@ -144,6 +150,16 @@ bool Server::setup() {
     // Output::handleFrame.
     tearing_control_manager = wlr_tearing_control_manager_v1_create(display, 1);
 
+    // wp-content-type-v1: lets a client hint what kind of content a
+    // surface holds (game/video/photo/none). Like tearing-control just
+    // above, this is a bare global with nothing to listen for at setup
+    // time -- we only ever query a specific surface's current hint on
+    // demand via wlr_surface_get_content_type_v1, from
+    // Output::updateAdaptiveSync, so a focused client's own "I'm a game"
+    // hint can pull in adaptive sync the same way the pre-existing
+    // exactly-one-visible-window heuristic already does.
+    content_type_manager = wlr_content_type_manager_v1_create(display, 1);
+
     // zwp-keyboard-shortcuts-inhibit-unstable-v1: lets a client ask that
     // its key events bypass compositor keybind handling entirely while
     // it holds keyboard focus -- what remote-desktop viewers, VM
@@ -184,6 +200,28 @@ bool Server::setup() {
             wlr_output_commit_state(event->output, &state);
             wlr_output_state_finish(&state);
         });
+
+    // ext-idle-notify-v1 + idle-inhibit-unstable-v1: together these are
+    // what let an idle daemon (swayidle) detect "no input for N seconds"
+    // at all (idle_notifier -- fed from every real input event via
+    // wlr_idle_notifier_v1_notify_activity, see input.cpp) and let a
+    // client suppress that detection while something that shouldn't be
+    // interrupted -- a video, a game -- is on screen
+    // (idle_inhibit_manager). Neither protocol is useful on its own:
+    // idle_notifier alone fires timeouts regardless of what's visible,
+    // and idle-inhibit alone has nothing to inhibit without an idle timer
+    // to begin with. The actual per-inhibitor bookkeeping and the
+    // visibility recompute that decides wlr_idle_notifier_v1_set_inhibited
+    // live in idle.{hpp,cpp}, since -- unlike shortcuts-inhibit's
+    // check-on-every-keypress -- this needs re-running from several
+    // different call sites (view map/unmap/minimize, tag-switch), not
+    // just from inhibitor creation/destruction.
+    idle_notifier        = wlr_idle_notifier_v1_create(display);
+    idle_inhibit_manager = wlr_idle_inhibit_v1_create(display);
+    new_idle_inhibitor.connect(&idle_inhibit_manager->events.new_inhibitor,
+                               [this](wlr_idle_inhibitor_v1* inhibitor) {
+                                   idle::newIdleInhibitor(*this, inhibitor);
+                               });
 
     output_layout = wlr_output_layout_create(display);
 
@@ -252,6 +290,31 @@ bool Server::setup() {
     // toplevel.cpp/xwayland_view.cpp's handleMap, and view.cpp for the
     // request_*/destroy wiring).
     foreign_toplevel_manager = wlr_foreign_toplevel_manager_v1_create(display);
+
+    // xdg-activation-v1: lets one client (a launcher, a background task
+    // that just finished, an xdg-desktop-portal window-activation
+    // request) ask to focus a *different* client's surface on its
+    // behalf. wlr_xdg_activation_v1 already owns the token issue/verify
+    // round-trip -- request_activate only ever fires once a client
+    // presents a token it was actually handed -- so all that's left for
+    // us to do is resolve event->surface back to a managed View and
+    // route it through the same Server::focusView every click/alt-tab
+    // bind already uses (session_locked, etc. all still apply for free).
+    // Unmanaged (X11 override-redirect) surfaces are deliberately
+    // excluded, same reasoning as the click-to-focus guard in
+    // input.cpp's cursor_button handler.
+    xdg_activation = wlr_xdg_activation_v1_create(display);
+    new_xdg_activation_request.connect(
+        &xdg_activation->events.request_activate,
+        [this](wlr_xdg_activation_v1_request_activate_event* event) {
+            for(auto& v : views) {
+                if(v->wlrSurface() == event->surface && v->mapped &&
+                   !v->unmanaged) {
+                    focusView(v.get());
+                    break;
+                }
+            }
+        });
 
     layer_shell = wlr_layer_shell_v1_create(display, 4);
     new_layer_surface.connect(
@@ -334,6 +397,27 @@ bool Server::setup() {
                 wlr_cursor_set_surface(
                     cursor, event->surface, event->hotspot_x, event->hotspot_y);
             }
+        });
+
+    // wp-cursor-shape-v1: lets a client just name a shape ("text",
+    // "grab", "wait", ...) instead of drawing/loading its own xcursor
+    // theme -- newer GTK4/Qt6-era toolkits increasingly assume this is
+    // available on top of (or instead of) the raw surface-based path
+    // above. wlr_cursor_shape_v1_name() maps the requested shape straight
+    // onto the xcursor name cursor_mgr already knows how to load, so this
+    // reuses the exact wlr_cursor_set_xcursor call every other cursor
+    // reset in this codebase (setupCursor's "default" below,
+    // xwayland_ready's) already goes through. Same focused-client guard
+    // as request_set_cursor above, same reason.
+    cursor_shape_manager = wlr_cursor_shape_manager_v1_create(display, 1);
+    request_set_cursor_shape.connect(
+        &cursor_shape_manager->events.request_set_shape,
+        [this](wlr_cursor_shape_manager_v1_request_set_shape_event* event) {
+            if(event->seat_client != seat->pointer_state.focused_client) {
+                return;
+            }
+            wlr_cursor_set_xcursor(
+                cursor, cursor_mgr, wlr_cursor_shape_v1_name(event->shape));
         });
 
     request_set_selection.connect(

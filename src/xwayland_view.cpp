@@ -7,6 +7,7 @@ extern "C" {
 #include <wlr/util/log.h>
 }
 
+#include "idle.hpp"
 #include "input.hpp"
 #include "layout.hpp"
 #include "output.hpp"
@@ -141,6 +142,8 @@ void XWaylandView::handleMap() {
     createForeignToplevel();
     server.focusView(this);
     playOpenAnimation();
+
+    idle::updateInhibitState(server);
 }
 
 void XWaylandView::handleUnmap() {
@@ -149,6 +152,7 @@ void XWaylandView::handleUnmap() {
 
     if(unmanaged) { return; }
     destroyForeignToplevel();
+    idle::updateInhibitState(server);
 
     if(server.cursor_mode != CursorMode::Passthrough &&
        server.grabbed_view == this) {

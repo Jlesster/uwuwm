@@ -3,6 +3,7 @@
 extern "C" {
 #include <wlr/backend/session.h>
 #include <wlr/types/wlr_cursor.h>
+#include <wlr/types/wlr_idle_notify_v1.h>
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_keyboard_shortcuts_inhibit_v1.h>
@@ -26,6 +27,18 @@ extern "C" {
 namespace {
 constexpr uint32_t kBindableMods = WLR_MODIFIER_SHIFT | WLR_MODIFIER_CTRL |
                                    WLR_MODIFIER_ALT | WLR_MODIFIER_LOGO;
+
+// ext-idle-notify-v1: resets every bound client's idle timer. Called from
+// every real input event below (key press/release, all four cursor
+// signals) regardless of whether the event went on to do anything else --
+// an idle daemon shouldn't care whether a keypress hit a compositor bind
+// or got forwarded to a client, only that *something* happened. No-op
+// pre-Server::setup-completing or if idle_notifier was never created.
+void notifyIdleActivity(Server& server) {
+    if(server.idle_notifier) {
+        wlr_idle_notifier_v1_notify_activity(server.idle_notifier, server.seat);
+    }
+}
 // Hit-tests the scene graph at layout coordinates (lx, ly). On a hit,
 // fills `surface` and surface-local coordinates, and returns the owning
 // View if the hit surface belongs to one -- an XdgToplevel or an
@@ -284,6 +297,8 @@ bool Keyboard::handleKeybind(uint32_t keycode, uint32_t modifiers_state) {
 }
 
 void Keyboard::handleKey(wlr_keyboard_key_event* event) {
+    notifyIdleActivity(server);
+
     uint32_t modifiers_state = wlr_keyboard_get_modifiers(wlr_keyboard);
     bool     handled         = false;
 
@@ -347,6 +362,8 @@ void setupCursor(Server& server) {
     server.cursor_motion.connect(
         &server.cursor->events.motion,
         [&server](wlr_pointer_motion_event* event) {
+            notifyIdleActivity(server);
+
             // While a LOCKED constraint is active, the
             // on-screen cursor must not move at all --
             // only the relative-motion channel below
@@ -384,6 +401,8 @@ void setupCursor(Server& server) {
     server.cursor_motion_absolute.connect(
         &server.cursor->events.motion_absolute,
         [&server](wlr_pointer_motion_absolute_event* event) {
+            notifyIdleActivity(server);
+
             if(!pointerLockActive(server)) {
                 wlr_cursor_warp_absolute(
                     server.cursor, &event->pointer->base, event->x, event->y);
@@ -395,6 +414,8 @@ void setupCursor(Server& server) {
     server.cursor_button.connect(
         &server.cursor->events.button,
         [&server](wlr_pointer_button_event* event) {
+            notifyIdleActivity(server);
+
             wlr_seat_pointer_notify_button(
                 server.seat, event->time_msec, event->button, event->state);
 
@@ -417,6 +438,8 @@ void setupCursor(Server& server) {
 
     server.cursor_axis.connect(
         &server.cursor->events.axis, [&server](wlr_pointer_axis_event* event) {
+            notifyIdleActivity(server);
+
             wlr_seat_pointer_notify_axis(server.seat,
                                          event->time_msec,
                                          event->orientation,
