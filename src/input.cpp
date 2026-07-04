@@ -6,6 +6,8 @@ extern "C" {
 #include <wlr/types/wlr_input_device.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_pointer.h>
+#include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_xcursor_manager.h>
 #include <wlr/util/edges.h>
@@ -63,7 +65,141 @@ View* desktopViewAt(Server&       server,
     return nullptr;
 }
 
+// Finds the View wrapping a given wlr_surface, or nullptr if it isn't one
+// (layer-shell surface, unmapped, etc.) -- same "walk server.views and
+// compare" approach desktopViewAt uses to distinguish View from
+// LayerSurface, just keyed by surface identity instead of scene node.
+View* viewForSurface(Server& server, wlr_surface* surface) {
+    if(!surface) { return nullptr; }
+    for(auto& v : server.views) {
+        if(v->wlrSurface() == surface) { return v.get(); }
+    }
+    return nullptr;
+}
+
+// True exactly when wl_pointer.motion delivery and cursor warping must
+// both be suppressed for ordinary (non-grab) pointer motion -- i.e. a
+// LOCKED constraint is active and we're not in the middle of a
+// compositor-initiated move/resize grab. Confine (CONFINED) does *not*
+// count: the cursor still moves and motion is still sent, just clamped
+// into the constraint's region -- see clampCursorToConstraint below.
+bool pointerLockActive(Server& server) {
+    return server.active_constraint &&
+           server.cursor_mode == CursorMode::Passthrough &&
+           server.active_constraint->wlr_constraint->type ==
+               WLR_POINTER_CONSTRAINT_V1_LOCKED;
+}
+
+// If a CONFINED constraint is active, clamps server.cursor->{x,y} back
+// into its region. No-op for LOCKED (the cursor doesn't move at all while
+// locked, so there's nothing to clamp) and for an empty region (a client
+// asking to confine to nothing is nonsensical; treat as unconfined rather
+// than freezing the cursor at whatever point it last happened to be).
+void clampCursorToConstraint(Server& server) {
+    if(!server.active_constraint) { return; }
+    wlr_pointer_constraint_v1* c = server.active_constraint->wlr_constraint;
+    if(c->type != WLR_POINTER_CONSTRAINT_V1_CONFINED) { return; }
+    if(!pixman_region32_not_empty(&c->region)) { return; }
+
+    // The region is in surface-local coordinates; server.cursor->{x,y}
+    // are layout (global) coordinates. content_tree is positioned at
+    // exactly the surface's on-screen origin (border offset already
+    // baked in -- see view.hpp), so wlr_scene_node_coords on it gives the
+    // exact conversion between the two spaces.
+    int   origin_x = 0, origin_y = 0;
+    View* v = viewForSurface(server, c->surface);
+    if(v) {
+        wlr_scene_node_coords(&v->content_tree->node, &origin_x, &origin_y);
+    }
+
+    double sx = server.cursor->x - origin_x;
+    double sy = server.cursor->y - origin_y;
+
+    if(pixman_region32_contains_point(
+           &c->region, static_cast<int>(sx), static_cast<int>(sy), nullptr)) {
+        return;
+    }
+
+    // Outside the region: clamp to its bounding box. Exact for the
+    // overwhelmingly common case of a single rectangular region (which is
+    // what every known game/toolkit actually requests); an approximation
+    // for a disjoint or concave region, since pixman doesn't expose a
+    // "nearest point in region" query and that shape is vanishingly rare
+    // in practice for this protocol.
+    const pixman_box32_t& b = c->region.extents;
+    sx                      = std::clamp(
+        sx, static_cast<double>(b.x1), static_cast<double>(b.x2 - 1));
+    sy = std::clamp(
+        sy, static_cast<double>(b.y1), static_cast<double>(b.y2 - 1));
+
+    wlr_cursor_warp(server.cursor, nullptr, origin_x + sx, origin_y + sy);
+}
+
+void deactivateActiveConstraint(Server& server) {
+    if(!server.active_constraint) { return; }
+    wlr_pointer_constraint_v1* wlr_constraint =
+        server.active_constraint->wlr_constraint;
+    // Clear first: wlr_pointer_constraint_v1_send_deactivated may destroy
+    // `wlr_constraint` outright for a oneshot-lifetime constraint, which
+    // would otherwise leave server.active_constraint dangling for the
+    // instant before its own destroy handler gets a chance to clear it.
+    server.active_constraint = nullptr;
+    wlr_pointer_constraint_v1_send_deactivated(wlr_constraint);
+}
+
+void activateConstraint(Server& server, PointerConstraint* pc) {
+    if(server.active_constraint == pc) { return; }
+    if(server.active_constraint) { deactivateActiveConstraint(server); }
+
+    server.active_constraint = pc;
+    wlr_pointer_constraint_v1_send_activated(pc->wlr_constraint);
+
+    // Locking guarantees (per the protocol spec) the pointer is already
+    // within bounds at activation; confining only recommends warping if
+    // it's outside. Doing it unconditionally here is a no-op for the
+    // common already-inside case and avoids a client-visible
+    // jump-then-clamp on the very next motion event otherwise.
+    clampCursorToConstraint(server);
+}
+
 }  // namespace
+
+// ---------------------------------------------------------------------------
+// PointerConstraint
+// ---------------------------------------------------------------------------
+
+PointerConstraint::PointerConstraint(Server&                    server,
+                                     wlr_pointer_constraint_v1* wlr_constraint)
+    : server(server), wlr_constraint(wlr_constraint) {
+    wlr_constraint->data = this;
+
+    destroy.connect(&wlr_constraint->events.destroy,
+                    [this](void*) { handleDestroy(); });
+    set_region.connect(&wlr_constraint->events.set_region,
+                       [this](void*) { handleSetRegion(); });
+}
+
+PointerConstraint::~PointerConstraint() {
+    if(server.active_constraint == this) { server.active_constraint = nullptr; }
+}
+
+void PointerConstraint::handleDestroy() {
+    Server& srv = server;  // copy the reference out before `this` goes away
+    srv.pointer_constraint_wrappers.remove_if(
+        [this](const std::unique_ptr<PointerConstraint>& p) {
+            return p.get() == this;
+        });
+}
+
+void PointerConstraint::handleSetRegion() {
+    // Nothing to cache: clampCursorToConstraint reads wlr_constraint->region
+    // directly at clamp time, so an updated region takes effect on the very
+    // next motion event with nothing to invalidate here. Kept as an
+    // explicit (empty) handler rather than not listening at all, so
+    // future region-dependent behavior -- e.g. immediately re-clamping if
+    // the cursor is left outside a newly-shrunk region -- has an obvious
+    // place to go.
+}
 
 // ---------------------------------------------------------------------------
 // Keyboard
@@ -110,7 +246,8 @@ void Keyboard::handleModifiers() {
 
 std::vector<xkb_keysym_t> Keyboard::getKeysyms(uint32_t keycode) {
     xkb_keymap*        keymap = xkb_state_get_keymap(wlr_keyboard->xkb_state);
-    xkb_layout_index_t layout = xkb_state_key_get_layout(wlr_keyboard->xkb_state, keycode + 8);
+    xkb_layout_index_t layout =
+        xkb_state_key_get_layout(wlr_keyboard->xkb_state, keycode + 8);
     const xkb_keysym_t* syms;
     int                 n = xkb_keymap_key_get_syms_by_level(
         keymap, keycode + 8, layout, /*level=*/0, &syms);
@@ -120,11 +257,12 @@ std::vector<xkb_keysym_t> Keyboard::getKeysyms(uint32_t keycode) {
 }
 
 bool Keyboard::handleKeybind(uint32_t keycode, uint32_t modifiers_state) {
-    auto syms = getKeysyms(keycode);
+    auto     syms          = getKeysyms(keycode);
     uint32_t relevant_mods = modifiers_state & kBindableMods;
 
     for(auto sym : syms) {
-        auto range = server.lua_cfg.keybinds.equal_range(static_cast<uint32_t>(sym));
+        auto range =
+            server.lua_cfg.keybinds.equal_range(static_cast<uint32_t>(sym));
         for(auto it = range.first; it != range.second; ++it) {
             const auto& bind = it->second;
             if(bind.mods == relevant_mods) {
@@ -196,20 +334,51 @@ void setupCursor(Server& server) {
     // All pointer motion ultimately funnels through wlr_cursor's signals
     // regardless of which physical device generated it, so we only ever
     // need to hook these once here, not per-device.
-    server.cursor_motion.connect(&server.cursor->events.motion,
-                                [&server](wlr_pointer_motion_event* event) {
-                                    wlr_cursor_move(server.cursor,
-                                                &event->pointer->base,
-                                                event->delta_x,
-                                                event->delta_y);
-                                    processCursorMotion(server, event->time_msec);
-                                });
+    server.cursor_motion.connect(
+        &server.cursor->events.motion,
+        [&server](wlr_pointer_motion_event* event) {
+            // While a LOCKED constraint is active, the
+            // on-screen cursor must not move at all --
+            // only the relative-motion channel below
+            // carries movement to the client. A
+            // CONFINED constraint still moves the
+            // cursor, just clamped afterwards.
+            if(!pointerLockActive(server)) {
+                wlr_cursor_move(server.cursor,
+                                &event->pointer->base,
+                                event->delta_x,
+                                event->delta_y);
+                clampCursorToConstraint(server);
+            }
+
+            // Sent unconditionally: independent of
+            // any lock/confine, this is a no-op
+            // unless some client has actually bound
+            // zwp_relative_pointer_v1 for the
+            // currently-focused pointer resource --
+            // wlroots handles that lookup internally.
+            if(server.relative_pointer_manager) {
+                wlr_relative_pointer_manager_v1_send_relative_motion(
+                    server.relative_pointer_manager,
+                    server.seat,
+                    static_cast<uint64_t>(event->time_msec) * 1000,
+                    event->delta_x,
+                    event->delta_y,
+                    event->unaccel_dx,
+                    event->unaccel_dy);
+            }
+
+            processCursorMotion(server, event->time_msec);
+        });
 
     server.cursor_motion_absolute.connect(
         &server.cursor->events.motion_absolute,
         [&server](wlr_pointer_motion_absolute_event* event) {
-            wlr_cursor_warp_absolute(
-                server.cursor, &event->pointer->base, event->x, event->y);
+            if(!pointerLockActive(server)) {
+                wlr_cursor_warp_absolute(
+                    server.cursor, &event->pointer->base, event->x, event->y);
+                clampCursorToConstraint(server);
+            }
             processCursorMotion(server, event->time_msec);
         });
 
@@ -236,16 +405,16 @@ void setupCursor(Server& server) {
             if(v && !v->unmanaged) { server.focusView(v); }
         });
 
-    server.cursor_axis.connect(&server.cursor->events.axis,
-                             [&server](wlr_pointer_axis_event* event) {
-                                 wlr_seat_pointer_notify_axis(server.seat,
-                                                               event->time_msec,
-                                                               event->orientation,
-                                                               event->delta,
-                                                               event->delta_discrete,
-                                                               event->source,
-                                                               event->relative_direction);
-                             });
+    server.cursor_axis.connect(
+        &server.cursor->events.axis, [&server](wlr_pointer_axis_event* event) {
+            wlr_seat_pointer_notify_axis(server.seat,
+                                         event->time_msec,
+                                         event->orientation,
+                                         event->delta,
+                                         event->delta_discrete,
+                                         event->source,
+                                         event->relative_direction);
+        });
 
     server.cursor_frame.connect(&server.cursor->events.frame, [&server](void*) {
         wlr_seat_pointer_notify_frame(server.seat);
@@ -264,10 +433,10 @@ void processCursorMotion(Server& server, uint32_t time_msec) {
     }
 
     if(server.cursor_mode == CursorMode::Resize && server.grabbed_view) {
-        View*  t   = server.grabbed_view;
-        double dx  = server.cursor->x - server.grab_x;
-        double    dy  = server.cursor->y - server.grab_y;
-        wlr_box   box = server.grab_geobox;
+        View*   t   = server.grabbed_view;
+        double  dx  = server.cursor->x - server.grab_x;
+        double  dy  = server.cursor->y - server.grab_y;
+        wlr_box box = server.grab_geobox;
 
         if(server.resize_edges & WLR_EDGE_TOP) {
             box.y += static_cast<int>(dy);
@@ -296,19 +465,63 @@ void processCursorMotion(Server& server, uint32_t time_msec) {
         server, server.cursor->x, server.cursor->y, &surface, &sx, &sy);
 
     if(!surface) {
+        if(server.active_constraint) { deactivateActiveConstraint(server); }
         wlr_cursor_set_xcursor(server.cursor, server.cursor_mgr, "default");
         wlr_seat_pointer_clear_focus(server.seat);
         return;
     }
 
     (void)v;
+
+    // Constraint (de)activation tracks pointer focus, checked only on an
+    // actual focus change rather than every motion event -- cheap, and
+    // the common case (already-focused surface, no constraint churn)
+    // does zero extra work per motion.
+    if(server.pointer_constraints &&
+       surface != server.seat->pointer_state.focused_surface) {
+        if(wlr_pointer_constraint_v1* c =
+               wlr_pointer_constraints_v1_constraint_for_surface(
+                   server.pointer_constraints, surface, server.seat)) {
+            activateConstraint(server,
+                               static_cast<PointerConstraint*>(c->data));
+        } else if(server.active_constraint &&
+                  server.active_constraint->wlr_constraint->surface !=
+                      surface) {
+            deactivateActiveConstraint(server);
+        }
+    }
+
     wlr_seat_pointer_notify_enter(server.seat, surface, sx, sy);
-    wlr_seat_pointer_notify_motion(server.seat, time_msec, sx, sy);
+
+    // Per the pointer-constraints spec: "While the lock ... is active, the
+    // wl_pointer objects of the associated seat will not emit any
+    // wl_pointer.motion events." Enter is still fine (nothing about focus
+    // changed), just not motion.
+    if(!pointerLockActive(server)) {
+        wlr_seat_pointer_notify_motion(server.seat, time_msec, sx, sy);
+    }
 }
 
 void resetCursorMode(Server& server) {
     server.cursor_mode  = CursorMode::Passthrough;
     server.grabbed_view = nullptr;
+}
+
+void newPointerConstraint(Server&                    server,
+                          wlr_pointer_constraint_v1* wlr_constraint) {
+    server.pointer_constraint_wrappers.push_back(
+        std::make_unique<PointerConstraint>(server, wlr_constraint));
+    PointerConstraint* pc = server.pointer_constraint_wrappers.back().get();
+
+    // Activate immediately if its surface already has pointer focus --
+    // the common case, since a client almost always requests the
+    // lock/confine right after it already has pointer focus on its own
+    // surface (e.g. reacting to a click). If it doesn't have focus yet,
+    // activation happens later from processCursorMotion's passthrough
+    // path once focus actually lands on this surface.
+    if(server.seat->pointer_state.focused_surface == wlr_constraint->surface) {
+        activateConstraint(server, pc);
+    }
 }
 
 void updateSeatCapabilities(Server& server) {

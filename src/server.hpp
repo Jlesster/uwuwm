@@ -39,6 +39,10 @@ struct wlr_xwayland_surface;
 struct wlr_session_lock_manager_v1;
 struct wlr_session_lock_v1;
 struct SessionLock;
+struct wlr_pointer_constraints_v1;
+struct wlr_pointer_constraint_v1;
+struct wlr_relative_pointer_manager_v1;
+struct PointerConstraint;
 
 enum class CursorMode {
     Passthrough,
@@ -80,6 +84,13 @@ public:
     wlr_xwayland*                xwayland             = nullptr;
     wlr_session_lock_manager_v1* session_lock_manager = nullptr;
 
+    // Pointer lock/confine (games' mouselook) + the relative-motion channel
+    // that rides alongside it. See input.hpp/input.cpp for the
+    // PointerConstraint wrapper and the activation/clamping logic that uses
+    // these.
+    wlr_pointer_constraints_v1*      pointer_constraints      = nullptr;
+    wlr_relative_pointer_manager_v1* relative_pointer_manager = nullptr;
+
     wlr_scene_tree* layer_tree[4] = {};
     wlr_scene_tree* window_tree   = nullptr;
 
@@ -104,6 +115,21 @@ public:
     // `outputs` be destroyed first during ~Server(), leaving ~SessionLock
     // to walk a list of already-freed Output objects.
     std::unique_ptr<SessionLock> session_lock;
+
+    // Every constraint a client currently has open (lock or confine
+    // requests are 1:1 with a PointerConstraint for as long as the
+    // client's zwp_locked_pointer_v1/zwp_confined_pointer_v1 object
+    // lives), most of which are inactive at any given moment -- only the
+    // one matching whatever surface currently has pointer focus, if any,
+    // is "active". See input.cpp's PointerConstraint/activateConstraint.
+    std::list<std::unique_ptr<PointerConstraint>> pointer_constraint_wrappers;
+
+    // Non-owning; points into pointer_constraint_wrappers, or nullptr.
+    // Only one constraint may be active across the whole seat at a time
+    // per the protocol spec (locking/confining an already-locked/confined
+    // pointer is a protocol error on the client's part, not something we
+    // need to arbitrate here).
+    PointerConstraint* active_constraint = nullptr;
 
     Output* focused_output = nullptr;
     View*   focused_view   = nullptr;
@@ -139,6 +165,7 @@ private:
     Listener<wlr_xwayland_surface>                      new_xwayland_surface;
     VoidListener                                        xwayland_ready;
     Listener<wlr_session_lock_v1>                       new_session_lock;
+    Listener<wlr_pointer_constraint_v1>                 new_pointer_constraint;
     Listener<wlr_input_device>                          new_input;
     Listener<wlr_seat_pointer_request_set_cursor_event> request_set_cursor;
     Listener<wlr_seat_request_set_selection_event>      request_set_selection;
@@ -151,4 +178,5 @@ private:
     friend struct LayerSurface;
     friend struct Keyboard;
     friend struct SessionLock;
+    friend struct PointerConstraint;
 };

@@ -1,6 +1,8 @@
 #include "server.hpp"
 
 extern "C" {
+#include <wlr/types/wlr_pointer_constraints_v1.h>
+#include <wlr/types/wlr_relative_pointer_v1.h>
 #include <wlr/types/wlr_session_lock_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/log.h>
@@ -199,6 +201,20 @@ bool Server::setup() {
     // 8. input: seat + per-device handling as new_input fires
     seat = wlr_seat_create(display, "seat0");
     input::setupCursor(*this);
+
+    // Pointer lock/confine + the relative-motion channel that rides
+    // alongside it -- what Proton/SDL games need for FPS-style mouselook.
+    // Must come after setupCursor (which creates server.cursor, read by
+    // the clamp logic these route into) but has no other ordering
+    // requirement, so it lives right next to the rest of seat/cursor setup.
+    pointer_constraints = wlr_pointer_constraints_v1_create(display);
+    new_pointer_constraint.connect(
+        &pointer_constraints->events.new_constraint,
+        [this](wlr_pointer_constraint_v1* constraint) {
+            input::newPointerConstraint(*this, constraint);
+        });
+
+    relative_pointer_manager = wlr_relative_pointer_manager_v1_create(display);
 
     new_input.connect(&backend->events.new_input,
                       [this](wlr_input_device* device) {
