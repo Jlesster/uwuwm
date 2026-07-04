@@ -144,6 +144,13 @@ void XWaylandView::handleMap() {
     playOpenAnimation();
 
     idle::updateInhibitState(server);
+
+    // See XdgToplevel::handleMap for the fire-order rationale (after
+    // focusView so client.focused() returns this view). The earlier
+    // `if(unmanaged) return;` gate means this is reached only for
+    // managed X11 windows, mirroring how uwu.client.list() excludes
+    // override-redirect surfaces.
+    server.lua_cfg.fireClientEvent("client::manage", this);
 }
 
 void XWaylandView::handleUnmap() {
@@ -178,6 +185,13 @@ void XWaylandView::handleUnmap() {
 }
 
 void XWaylandView::handleDestroy() {
+    // Pair with handleMap's !unmanaged gate: an X11 override-redirect
+    // window's manage was never fired, so its unmanage mustn't be
+    // either. See XdgToplevel::handleDestroy for the fire-before-remove
+    // ordering rationale.
+    if(!unmanaged) {
+        server.lua_cfg.fireClientEvent("client::unmanage", this);
+    }
     server.views.remove_if(
         [this](const std::unique_ptr<View>& v) { return v.get() == this; });
 }

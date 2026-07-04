@@ -113,6 +113,14 @@ void View::setFullscreen(bool fullscreen) {
         wlr_foreign_toplevel_handle_v1_set_fullscreen(foreign_toplevel,
                                                       fullscreen);
     }
+
+    // Single fire site covers every entry point: the client's own
+    // request_fullscreen, a foreign-toplevel client's request, the
+    // mod+f keybind's toggle, `client.fullscreen = ...` from rc.lua,
+    // and the fullscreen branch of `uwu.rule`. The early-return at the
+    // top of this function guarantees we only fire on actual state
+    // transitions, not no-op re-asserts.
+    server.lua_cfg.fireClientEvent("client::fullscreen", this);
 }
 
 void View::updateBorderColor(bool focused, float alpha) {

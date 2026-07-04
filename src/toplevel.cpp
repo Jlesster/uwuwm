@@ -109,6 +109,11 @@ void XdgToplevel::handleMap() {
     // zwp_idle_inhibitor_v1 was created against before it ever mapped
     // (e.g. a game requesting the inhibitor from its splash screen).
     idle::updateInhibitState(server);
+
+    // Fire *after* focusView so a uwu.hook("client::manage", fn) callback
+    // can call client.focused() and see the just-mapped view (matching
+    // what every other compositor's manage hook observes).
+    server.lua_cfg.fireClientEvent("client::manage", this);
 }
 
 void XdgToplevel::handleUnmap() {
@@ -152,6 +157,12 @@ void XdgToplevel::handleNewPopup(wlr_xdg_popup* popup) {
 }
 
 void XdgToplevel::handleDestroy() {
+    // Fires from handleDestroy, not handleUnmap: handleUnmap is "hidden"
+    // (a tray app can re-map later and re-fire client::manage), whereas
+    // handleDestroy is "gone" -- the View is about to leave
+    // server.views, and the fire happens before remove_if so any hook
+    // capturing a Client userdata can still resolve it via checkClient.
+    server.lua_cfg.fireClientEvent("client::unmanage", this);
     server.views.remove_if(
         [this](const std::unique_ptr<View>& v) { return v.get() == this; });
 }

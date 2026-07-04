@@ -33,6 +33,33 @@ that path. `scripts/patch_wlroots_headers.py` patches the system wlroots headers
 into a C++-compatible form before compiling against them — this runs
 automatically as part of the meson build.
 
+## Installing
+
+```sh
+meson setup build
+ninja -C build
+# Display-manager visibility requires /usr -- the default /usr/local
+# prefix lands the .desktop where GDM/SDDM don't scan. Configure with
+# -Dprefix=/usr before install if you want uwuwm in your login screen.
+meson configure build -Dprefix=/usr      # optional, for DM discovery
+sudo meson install -C build             # → /usr/bin, /usr/share/...
+```
+
+Files installed under `$prefix`:
+
+- `$bindir/uwuwm` — the binary
+- `$datadir/wayland-sessions/uwuwm.desktop` — session entry the
+  display manager discovers (GDM, SDDM, LightDM all scan this dir)
+- `$datadir/uwuwm/rc.lua` — a reference copy of the example config;
+  uwuwm never reads it at runtime (it only looks at
+  `~/.config/uwuwm/rc.lua`), this is just a `cp` target for new users
+  who'd rather not clone the repo to start
+
+If you don't want uwuwm visible in your DM, just skip the
+`meson configure -Dprefix=/usr` line and run `meson install` without
+sudo — everything lands under `/usr/local/...` and you can launch uwuwm
+manually from a TTY as in the "Running" section below.
+
 ## Running
 
 From inside an existing Hyprland/Wayland/X11 session (development mode — you'll

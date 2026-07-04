@@ -1,0 +1,7 @@
+[Desktop Entry]
+Name=uwuwm
+Comment=Tiling Wayland compositor with Lua-driven config
+Exec=/usr/bin/uwuwm
+Type=Application
+DesktopNames=uwuwm
+Keywords=tiling;wayland;compositor;windowmanager;

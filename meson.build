@@ -129,5 +129,49 @@ exe = executable(
     cpp_args: patched_inc_args,
     c_args: patched_inc_args,
     link_args: ['-Wl,--as-needed'],
-    install: false,
+    install: true,
+)
+
+# ── Install layout (Standard FHS) ───────────────────────────────────────
+# Default Meson prefix is /usr/local; `meson install` is what writes to
+# the prefix. The expected user flow is:
+#
+#   meson setup build
+#   ninja -C build
+#   sudo meson install        # copies to /usr/bin, /usr/share/...
+#
+# (or, without sudo: `meson configure build -Dprefix=/usr` first; the
+# default /usr/local is for personal installs that don't go through a
+# package manager, but the .desktop file there is invisible to GDM/SDDM
+# which only scan /usr/share/wayland-sessions).
+#
+# Files installed:
+#   /usr/bin/uwuwm                       the binary (executable.install: true)
+#   /usr/share/wayland-sessions/uwuwm.desktop  DM-visible session entry
+#   /usr/share/uwuwm/rc.lua              example config the user can copy
+#                                         to ~/.config/uwuwm/rc.lua; never
+#                                         auto-loaded (the runtime looks at
+#                                         ~/.config/uwuwm/rc.lua first and
+#                                         the embedded kDefaultConfig only
+#                                         if that doesn't exist).
+#
+# NOT installed: the autostart script, which is per-user and not part
+# of the shipped tree (the user creates ~/.config/uwuwm/autostart.sh).
+
+install_data(
+    'wayland-sessions/uwuwm.desktop',
+    install_dir: get_option('datadir') / 'wayland-sessions',
+)
+
+# Copy the example rc.lua to /usr/share/uwuwm/ as a *reference*, not as
+# something the runtime reads -- uwuwm never looks in /usr/share/uwuwm/
+# at startup. The point is just so a fresh user has a copy they can
+# `cp /usr/share/uwuwm/rc.lua ~/.config/uwuwm/` to start editing from,
+# without having to clone the repo. `install_mode` preserves the source
+# file's mode bits (444) so the user can't accidentally edit the
+# /usr copy and wonder why their changes vanish on the next update.
+install_data(
+    'rc.lua',
+    install_dir: get_option('datadir') / 'uwuwm',
+    install_mode: 'rw-r--r--',
 )

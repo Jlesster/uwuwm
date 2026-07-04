@@ -545,15 +545,20 @@ void Server::focusView(View* view) {
     if(session_locked) { return; }
 
     if(focused_view == view) { return; }
-    Output* prev_output = focused_view ? focused_view->output : nullptr;
+    View*   prev         = focused_view;
+    Output* prev_output  = prev ? prev->output : nullptr;
 
-    if(focused_view) { focused_view->setFocused(false); }
+    if(prev) { prev->setFocused(false); }
 
     focused_view = view;
 
     if(!view) {
         wlr_seat_keyboard_clear_focus(seat);
         if(prev_output) { prev_output->updateAdaptiveSync(); }
+        // Pair fire: focus is becoming null, so prev loses focus. The
+        // focus fire is suppressed (no new view to fire it on), only
+        // the unfocus fire runs.
+        lua_cfg.fireClientEvent("client::unfocus", prev);
         return;
     }
 
@@ -577,6 +582,15 @@ void Server::focusView(View* view) {
         prev_output->updateAdaptiveSync();
     }
     if(view->output) { view->output->updateAdaptiveSync(); }
+
+    // Fire *after* every piece of state that a hook might want to read
+    // is in its final position: focused_view updated, prev->setFocused
+    // (false) already applied (so the unfocus arg has a freshly-updated
+    // border colour), and adaptive sync decided. Order is unfocus-then-
+    // focus so a hook that flips focus again from inside either one
+    // observes the same intermediate state a non-hook caller would.
+    if(prev) { lua_cfg.fireClientEvent("client::unfocus", prev); }
+    lua_cfg.fireClientEvent("client::focus", view);
 }
 
 Output* Server::outputAt(double lx, double ly) {

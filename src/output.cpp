@@ -228,6 +228,12 @@ Output::Output(Server& server, struct wlr_output* wlr_output)
 
     server.arrangeAllOutputs();
     if(!server.focused_output) { server.focused_output = this; }
+
+    // Fires for every output, whether it came up at compositor startup
+    // or hotplugged later. The spec is silent on the distinction and
+    // "fires for every output" matches what every other compositor's
+    // analogous output::connect does.
+    server.lua_cfg.fireOutputEvent("output::connect", this);
 }
 
 Output::~Output() {
@@ -389,6 +395,13 @@ void Output::handleDestroy() {
         server.focused_view = nullptr;
     }
 
+    // Fires before remove_if so the hook can still inspect this output
+    // via server.outputs / uwu.monitor.list(). wlr_output->name is still
+    // valid here -- wlroots frees it as part of its own destroy
+    // signal emission that brought us here, which completes after
+    // this listener returns.
+    server.lua_cfg.fireOutputEvent("output::disconnect", this);
+
     server.outputs.remove_if(
         [this](const std::unique_ptr<Output>& o) { return o.get() == this; });
 
@@ -434,6 +447,7 @@ void Output::setTagset(uint32_t new_tagset) {
         tagset = new_tagset;
         layout::arrange(*this);
         idle::updateInhibitState(server);
+        server.lua_cfg.fireTagChange(this, new_tagset);
         return;
     }
 
@@ -466,6 +480,7 @@ void Output::setTagset(uint32_t new_tagset) {
         }
     }
     idle::updateInhibitState(server);
+    server.lua_cfg.fireTagChange(this, new_tagset);
 }
 
 void Output::applyRule(const MonitorRule& rule) {
