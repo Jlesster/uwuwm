@@ -4,6 +4,7 @@ extern "C" {
 #include <wlr/util/box.h>
 }
 
+#include "dwindle.hpp"
 #include "output.hpp"
 #include "server.hpp"
 #include "view.hpp"
@@ -39,19 +40,12 @@ void incMasterFactor(Output& output, double delta) {
     arrange(output);
 }
 
-void arrange(Output& output) {
+namespace {
+
+void masterStackArrange(Output& output) {
     Server& server = output.server;
 
-    for(auto& t : server.views) {
-        if(!t->mapped || t->output != &output) { continue; }
-        wlr_scene_node_set_enabled(
-            &t->scene_tree->node,
-            !t->is_minimized && (t->tags & output.tagset) != 0);
-    }
-
     auto tiled = getTiledViews(output);
-    output.updateAdaptiveSync();
-
     if(tiled.empty()) { return; }
 
     const wlr_box& area = output.usable_box;
@@ -92,6 +86,30 @@ void arrange(Output& output) {
             tiled[n_master + i]->setGeometry(box);
             y += slot_h + gap;
         }
+    }
+}
+
+}  // namespace
+
+void arrange(Output& output) {
+    Server& server = output.server;
+
+    for(auto& t : server.views) {
+        if(!t->mapped || t->output != &output) { continue; }
+        wlr_scene_node_set_enabled(
+            &t->scene_tree->node,
+            !t->is_minimized && (t->tags & output.tagset) != 0);
+    }
+
+    output.updateAdaptiveSync();
+
+    switch(output.layout_mode) {
+        case LayoutMode::MasterStack:
+            masterStackArrange(output);
+            break;
+        case LayoutMode::Dwindle:
+            dwindle::arrange(output);
+            break;
     }
 }
 

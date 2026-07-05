@@ -19,6 +19,7 @@ extern "C" {
 }
 
 #include "config.hpp"
+#include "dwindle.hpp"
 #include "layout.hpp"
 #include "output.hpp"
 #include "server.hpp"
@@ -189,6 +190,10 @@ const std::unordered_map<std::string, SetterFunc> kSettingSetters = {
      [](lua_State* L, RuntimeConfig& s) {
          parseColorRgba(luaL_checkstring(L, 2), s.background_color);
      }},
+    {"dwindle_preserve_split",
+     [](lua_State* L, RuntimeConfig& s) {
+         s.dwindle_preserve_split = lua_toboolean(L, 2);
+     }},
 };
 
 // uwu.get()'s inverse map -- added alongside uwu.set() so a rule/hook can
@@ -242,6 +247,10 @@ const std::unordered_map<std::string, GetterFunc> kSettingGetters = {
      [](lua_State* L, const RuntimeConfig& s) {
          lua_pushstring(
              L, colorToHexString(rgbaToPacked(s.background_color)).c_str());
+     }},
+    {"dwindle_preserve_split",
+     [](lua_State* L, const RuntimeConfig& s) {
+         lua_pushboolean(L, s.dwindle_preserve_split);
      }},
 };
 
@@ -675,6 +684,54 @@ int l_inc_master(lua_State* L) {
     return 0;
 }
 
+// uwu.set_layout("master" | "dwindle") -- switches the *focused output's*
+// tiling algorithm. Per-output rather than global, same reasoning as
+// master_factor: layout::LayoutMode already lives on Output, not Server.
+int l_set_layout(lua_State* L) {
+    const char* name   = luaL_checkstring(L, 1);
+    Server*     server = getServer(L);
+    if(!server->focused_output) { return 0; }
+    std::string n(name);
+    if(n == "dwindle") {
+        server->focused_output->layout_mode = layout::LayoutMode::Dwindle;
+    } else if(n == "master" || n == "masterstack" || n == "master_stack") {
+        server->focused_output->layout_mode = layout::LayoutMode::MasterStack;
+    } else {
+        wlr_log(WLR_ERROR, "uwu.set_layout: unknown layout \"%s\"", name);
+        return 0;
+    }
+    layout::arrange(*server->focused_output);
+    return 0;
+}
+
+int l_dwindle_toggle_split(lua_State* L) {
+    dwindle::toggleSplit(getServer(L)->focused_view);
+    return 0;
+}
+
+int l_dwindle_swap_split(lua_State* L) {
+    dwindle::swapSplit(getServer(L)->focused_view);
+    return 0;
+}
+
+int l_dwindle_rotate_split(lua_State* L) {
+    int angle = luaL_optinteger(L, 1, 90);
+    dwindle::rotateSplit(getServer(L)->focused_view, angle);
+    return 0;
+}
+
+int l_dwindle_splitratio(lua_State* L) {
+    float delta = static_cast<float>(luaL_checknumber(L, 1));
+    dwindle::adjustSplitRatio(getServer(L)->focused_view, delta);
+    return 0;
+}
+
+int l_dwindle_move_to_root(lua_State* L) {
+    bool stable = lua_isnoneornil(L, 1) ? true : lua_toboolean(L, 1);
+    dwindle::moveToRoot(getServer(L)->focused_view, stable);
+    return 0;
+}
+
 // Tag indices are 1-based on the Lua side (uwu.tag_count == 9, valid
 // arguments 1..9) to match normal Lua array convention; converted to the
 // internal 0-based bit index here.
@@ -1044,23 +1101,29 @@ const luaL_Reg kTagFuncs[] = {
 };
 
 const luaL_Reg kuwuwmFuncs[] = {
-    {"spawn",             l_spawn            },
-    {"bind",              l_bind             },
-    {"set",               l_set              },
-    {"get",               l_get              },
-    {"quit",              l_quit             },
-    {"reload",            l_reload           },
-    {"hook",              l_hook             },
-    {"unhook",            l_unhook           },
-    {"rule",              l_rule             },
-    {"kill",              l_kill             },
-    {"focus_next",        l_focus_next       },
-    {"focus_prev",        l_focus_prev       },
-    {"toggle_floating",   l_toggle_floating  },
-    {"toggle_fullscreen", l_toggle_fullscreen},
-    {"inc_master",        l_inc_master       },
-    {"focus_monitor",     l_focus_monitor    },
-    {nullptr,             nullptr            },
+    {"spawn",                l_spawn               },
+    {"bind",                 l_bind                },
+    {"set",                  l_set                 },
+    {"get",                  l_get                 },
+    {"quit",                 l_quit                },
+    {"reload",               l_reload              },
+    {"hook",                 l_hook                },
+    {"unhook",               l_unhook              },
+    {"rule",                 l_rule                },
+    {"kill",                 l_kill                },
+    {"focus_next",           l_focus_next          },
+    {"focus_prev",           l_focus_prev          },
+    {"toggle_floating",      l_toggle_floating     },
+    {"toggle_fullscreen",    l_toggle_fullscreen   },
+    {"inc_master",           l_inc_master          },
+    {"focus_monitor",        l_focus_monitor       },
+    {"set_layout",           l_set_layout          },
+    {"dwindle_toggle_split", l_dwindle_toggle_split},
+    {"dwindle_swap_split",   l_dwindle_swap_split  },
+    {"dwindle_rotate_split", l_dwindle_rotate_split},
+    {"dwindle_splitratio",   l_dwindle_splitratio  },
+    {"dwindle_move_to_root", l_dwindle_move_to_root},
+    {nullptr,                nullptr               },
 };
 
 // Embedded fallback, used only if no rc.lua is found on disk. Mirrors the
@@ -1095,6 +1158,16 @@ uwu.bind({"mod"}, "f", function() uwu.toggle_fullscreen() end)
 uwu.bind({"mod"}, "i", function() uwu.inc_master(0.05) end)
 uwu.bind({"mod"}, "u", function() uwu.inc_master(-0.05) end)
 uwu.bind({"mod"}, "Tab", function() uwu.focus_monitor(1) end)
+
+-- Dwindle (Hyprland-style BSP) tiling is available as an alternative to
+-- the default master-stack layout -- uncomment to switch the focused
+-- monitor to it, and to get togglesplit/swapsplit/splitratio bindings:
+-- uwu.set_layout("dwindle")
+-- uwu.bind({"mod"}, "p", function() uwu.dwindle_toggle_split() end)
+-- uwu.bind({"mod", "shift"}, "p", function() uwu.dwindle_swap_split() end)
+-- uwu.bind({"mod"}, "r", function() uwu.dwindle_rotate_split() end)
+-- uwu.bind({"mod"}, "minus", function() uwu.dwindle_splitratio(-0.1) end)
+-- uwu.bind({"mod"}, "equal", function() uwu.dwindle_splitratio(0.1) end)
 
 for i = 1, uwu.tag_count do
 	uwu.bind({"mod"}, tostring(i), function() uwu.tag.view(i) end)

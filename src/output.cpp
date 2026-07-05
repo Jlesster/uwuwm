@@ -7,6 +7,7 @@ extern "C" {
 #include <wlr/util/log.h>
 }
 
+#include "dwindle.hpp"
 #include "idle.hpp"
 #include "layershell.hpp"
 #include "layout.hpp"

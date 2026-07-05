@@ -34,10 +34,7 @@ void ToplevelDecoration::handleDestroy() {
 }
 
 void ToplevelDecoration::handleCommit(wlr_surface* /*surface*/) {
-    // First commit on the toplevel's surface -- xdg_surface is now
-    // initialized, so schedule_configure (called transitively by
-    // set_mode) is safe.
-    if(!mode_set) {
+    if(!mode_set && decoration->toplevel->base->initialized) {
         mode_set = true;
         wlr_xdg_toplevel_decoration_v1_set_mode(
             decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
@@ -45,14 +42,7 @@ void ToplevelDecoration::handleCommit(wlr_surface* /*surface*/) {
 }
 
 void ToplevelDecoration::handleRequestMode() {
-    // Ignore decoration->requested_mode entirely -- always re-assert
-    // server-side. wlr_xdg_toplevel_decoration_v1_set_mode is a no-op
-    // when the mode hasn't actually changed from what's already
-    // scheduled, so this stays cheap even for a client that politely
-    // re-requests SSD itself. Skip the call until the surface has
-    // been initialized -- otherwise we hit the same assertion failure
-    // as the constructor would.
-    if(!mode_set) { return; }
+    if(!mode_set || !decoration->toplevel->base->initialized) { return; }
     wlr_xdg_toplevel_decoration_v1_set_mode(
         decoration, WLR_XDG_TOPLEVEL_DECORATION_V1_MODE_SERVER_SIDE);
 }

@@ -5,14 +5,19 @@ extern "C" {
 #include <wlr/types/wlr_scene.h>
 }
 
+#include "layout.hpp"
 #include "listener.hpp"
 
 #include <cstdint>
 #include <list>
+#include <memory>
 
 class Server;
 struct MonitorRule;
 struct SessionLockSurface;
+namespace dwindle {
+struct DwindleNode;
+}
 
 // One physical (or nested-window, in dev mode) display. Equivalent to dwl's
 // `Monitor`.
@@ -47,6 +52,17 @@ struct Output {
     bool   adaptive_sync_on = false;
     double master_factor;  // fraction of usable_box width given to the master
                            // column
+
+    // Which tiling algorithm layout::arrange() uses on this output. See
+    // layout.hpp's LayoutMode and dwindle.hpp.
+    layout::LayoutMode layout_mode = layout::LayoutMode::MasterStack;
+
+    // Persistent BSP tree backing the dwindle layout, valid (and non-null
+    // once at least one window has ever been tiled) only when layout_mode
+    // == Dwindle -- untouched, and left empty, under master-stack. Owned
+    // exclusively here; see dwindle.hpp's DwindleNode for why this is a
+    // unique_ptr to a type this header only forward-declares.
+    std::unique_ptr<dwindle::DwindleNode> dwindle_root;
 
     // Layer-shell surfaces anchored to this output, one list per
     // zwlr_layer_shell_v1_layer value. Kept here (not just in the scene

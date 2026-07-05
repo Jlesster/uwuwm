@@ -218,6 +218,22 @@ void XdgToplevel::handleRequestMaximize() {
     // We don't implement a distinct maximize state; tiling already gives
     // every window a maximized-equivalent size when it's the lone window
     // on a tag. Just ack so well-behaved clients don't spin waiting.
+    //
+    // Guard on initialized: per the xdg-shell protocol, a client is
+    // explicitly allowed to request maximized *during its initial setup,
+    // before the first commit* ("Even without attaching a buffer the
+    // compositor must respond to initial committed configuration, for
+    // instance sending a configure event... if the client maximized its
+    // surface during initialization" -- xdg_toplevel.set_maximized doc).
+    // If that happens before XdgToplevel::handleCommit has processed
+    // initial_commit for this surface, base->initialized will still be
+    // false and schedule_configure() would hit the same
+    // "surface->initialized" assertion decoration.cpp works around.
+    // Dropping the request here is safe: XdgToplevel::handleCommit's own
+    // initial_commit handling (which runs once, unconditionally, as part
+    // of first-commit processing) will send the first real configure
+    // shortly after regardless.
+    if(!xdg_toplevel->base->initialized) { return; }
     wlr_xdg_surface_schedule_configure(xdg_toplevel->base);
 }
 

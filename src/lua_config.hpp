@@ -24,6 +24,13 @@ struct RuntimeConfig {
     int    border_px     = 2;
     double master_factor = 0.55;
 
+    // See dwindle.hpp/dwindle.cpp. Matches Hyprland's dwindle:preserve_split
+    // default (0/false): off means each split's orientation is recomputed
+    // from its box's aspect ratio on every arrange, so
+    // uwu.dwindle_toggle_split()/uwu.dwindle_rotate_split() only have a
+    // lasting effect once this is turned on.
+    bool dwindle_preserve_split = false;
+
     uint32_t border_color_active   = 0xcba6f7ff;  // catppuccin mauve
     uint32_t border_color_inactive = 0x313244ff;  // catppuccin surface0
     float    background_color[4]   = {0.067f, 0.071f, 0.090f, 1.0f};  // base

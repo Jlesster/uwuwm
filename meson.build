@@ -104,6 +104,7 @@ src = files(
     'src/main.cpp',
     'src/server.cpp',
     'src/output.cpp',
+    'src/dwindle.cpp',
     'src/idle.cpp',
     'src/toplevel.cpp',
     'src/xwayland_view.cpp',
