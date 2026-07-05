@@ -80,6 +80,17 @@ struct View {
                   // inside via wlr_scene_surface_create.
     wlr_scene_rect* border_rects[4] = {};  // top, bottom, left, right
 
+    // Correction for the client's xdg_surface window-geometry x/y offset
+    // (GTK/Qt use a non-zero offset here to reserve invisible space for
+    // CSD drop-shadows around the real visible window). Always 0 for
+    // XWaylandView, which has no equivalent concept. XdgToplevel keeps
+    // this in sync with xdg_toplevel->base->geometry on every commit --
+    // see XdgToplevel::handleCommit. applyBoxToScene uses it so the
+    // border hugs the client's actual visible bounds instead of its
+    // surface buffer's bounds.
+    int content_offset_x = 0;
+    int content_offset_y = 0;
+
     std::string title;
     std::string app_id;
 

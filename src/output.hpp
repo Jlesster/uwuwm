@@ -55,7 +55,7 @@ struct Output {
 
     // Which tiling algorithm layout::arrange() uses on this output. See
     // layout.hpp's LayoutMode and dwindle.hpp.
-    layout::LayoutMode layout_mode = layout::LayoutMode::MasterStack;
+    layout::LayoutMode layout_mode = layout::LayoutMode::Dwindle;
 
     // Persistent BSP tree backing the dwindle layout, valid (and non-null
     // once at least one window has ever been tiled) only when layout_mode

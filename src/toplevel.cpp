@@ -34,6 +34,10 @@ XdgToplevel::XdgToplevel(Server& server, wlr_xdg_toplevel* xdg_toplevel)
     }
 
     content_tree = wlr_scene_xdg_surface_create(scene_tree, xdg_toplevel->base);
+    // No committed geometry exists yet at construction time, so the
+    // offset is 0/0 here -- handleCommit takes over correcting this
+    // (and re-applying border_px on top of it) from the first commit
+    // onward.
     wlr_scene_node_set_position(&content_tree->node, border_px, border_px);
 
     map_listener.connect(&xdg_toplevel->base->surface->events.map,
@@ -188,6 +192,25 @@ void XdgToplevel::handleCommit(wlr_surface* /*surface*/) {
         }
 
         wlr_xdg_toplevel_set_size(xdg_toplevel, 0, 0);
+    }
+
+    // The client's window geometry (xdg_surface.set_window_geometry) can
+    // carry a non-zero x/y offset -- GTK/Qt use this to reserve invisible
+    // space for CSD drop-shadows around the actual visible window bounds.
+    // wlr_scene_xdg_surface_create roots content_tree at the wl_surface's
+    // own buffer origin, which sits *outside* that visible rectangle for
+    // such clients -- without correcting for it, our border hugs the
+    // buffer edge instead of the client's real visible edge, clipping
+    // into the shadow on one side and cutting off real content (or
+    // leaving a border-sized gap) on the opposite side. Geometry is
+    // double-buffered client state that can change on any commit, wholly
+    // independent of any resize we initiated, so re-check every time
+    // rather than only on initial_commit.
+    const wlr_box& client_geo = xdg_toplevel->base->geometry;
+    if(client_geo.x != content_offset_x || client_geo.y != content_offset_y) {
+        content_offset_x = client_geo.x;
+        content_offset_y = client_geo.y;
+        applyBoxToScene(geo);
     }
 }
 

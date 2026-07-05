@@ -54,7 +54,12 @@ View::~View() {
 void View::applyBoxToScene(const wlr_box& box) {
     int b = server.lua_cfg.settings.border_px;
     wlr_scene_node_set_position(&scene_tree->node, box.x, box.y);
-    wlr_scene_node_set_position(&content_tree->node, b, b);
+    // Subtracting content_offset_x/y shifts the client's surface tree so
+    // its *visible* window geometry -- not its raw buffer origin -- lands
+    // at (b, b), i.e. flush against the inside of the border. See the
+    // content_offset_x/y comment in view.hpp for why this offset exists.
+    wlr_scene_node_set_position(
+        &content_tree->node, b - content_offset_x, b - content_offset_y);
 
     int w = box.width, h = box.height;
     wlr_scene_rect_set_size(border_rects[0], w, b);

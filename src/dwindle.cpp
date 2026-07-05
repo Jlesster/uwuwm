@@ -126,9 +126,15 @@ void insertLeaf(Output& output, View* view) {
         return;
     }
 
-    DwindleNode*                 old_parent = opening_on->parent;
-    std::unique_ptr<DwindleNode> opening_on_owned =
-        std::move(owningSlot(output, opening_on));
+    DwindleNode* old_parent = opening_on->parent;
+    // Hold onto the *reference* to the slot that used to own opening_on
+    // (output.dwindle_root, or old_parent->children[0 or 1]) rather than
+    // just the raw pointer -- we move the new subtree back into this
+    // same reference below instead of re-deriving which child index it
+    // was, which would be comparing against an already-emptied slot.
+    std::unique_ptr<DwindleNode>& opening_on_slot =
+        owningSlot(output, opening_on);
+    std::unique_ptr<DwindleNode> opening_on_owned = std::move(opening_on_slot);
 
     auto         new_parent     = std::make_unique<DwindleNode>();
     DwindleNode* new_parent_ptr = new_parent.get();
@@ -158,17 +164,13 @@ void insertLeaf(Output& output, View* view) {
     new_parent->children[0]->parent = new_parent_ptr;
     new_parent->children[1]->parent = new_parent_ptr;
 
-    if(old_parent) {
-        int idx = (old_parent->children[0].get() == opening_on)   ? 0
-                  : (old_parent->children[1].get() == opening_on) ? 1
-                                                                  : -1;
-        // old_parent->children[idx] was moved-from by owningSlot() above,
-        // so this is now assigning into an empty slot, not overwriting a
-        // live node.
-        if(idx >= 0) { old_parent->children[idx] = std::move(new_parent); }
-    } else {
-        output.dwindle_root = std::move(new_parent);
-    }
+    // Re-use the same slot reference we emptied above -- this is
+    // output.dwindle_root itself when opening_on had no parent, or
+    // old_parent->children[0 or 1] otherwise. Re-deriving that index by
+    // comparing pointers here (as opposed to reusing the reference)
+    // would be comparing against a slot we already moved out of, which
+    // is always empty by this point -- see the comment above.
+    opening_on_slot = std::move(new_parent);
 
     recalc(new_parent_ptr,
            output.server.lua_cfg.settings.dwindle_preserve_split,
