@@ -33,6 +33,7 @@ struct View;
 struct Popup;
 struct LayerSurface;
 struct Keyboard;
+struct InputDevice;
 struct wlr_layer_shell_v1;
 struct wlr_xwayland;
 struct wlr_xwayland_surface;
@@ -209,6 +210,14 @@ public:
     std::list<std::unique_ptr<View>>         views;
     std::list<std::unique_ptr<LayerSurface>> layer_surfaces;
     std::list<std::unique_ptr<Keyboard>>     keyboards;
+
+    // One entry per currently-connected pointer input device (mice,
+    // touchpads, trackballs -- anything WLR_INPUT_DEVICE_POINTER), kept
+    // around purely so uwu.input.set()/uwu.input.list() have something to
+    // walk when applying/reporting live libinput config; wlr_cursor
+    // itself already aggregates all of them for motion, so nothing else
+    // in the compositor needs this list. See input.hpp's InputDevice.
+    std::list<std::unique_ptr<InputDevice>> input_devices;
 
     // True from the moment a lock is granted (SessionLock's constructor
     // runs) until a clean unlock -- unlike `bool(session_lock)`, this

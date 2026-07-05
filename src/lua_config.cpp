@@ -8,10 +8,12 @@
 extern "C" {
 
 #include <lauxlib.h>
+#include <libinput.h>
 #include <lua.h>
 #include <lualib.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <wlr/backend/libinput.h>
 #include <wlr/types/wlr_keyboard.h>
 #include <wlr/types/wlr_output.h>
 #include <wlr/util/log.h>
@@ -20,6 +22,7 @@ extern "C" {
 
 #include "config.hpp"
 #include "dwindle.hpp"
+#include "input.hpp"
 #include "layout.hpp"
 #include "output.hpp"
 #include "server.hpp"
@@ -104,6 +107,8 @@ void getOptionalField(
             out = static_cast<int>(luaL_checknumber(L, -1));
         } else if constexpr(std::is_same_v<T, float>) {
             out = static_cast<float>(luaL_checknumber(L, -1));
+        } else if constexpr(std::is_same_v<T, double>) {
+            out = luaL_checknumber(L, -1);
         } else if constexpr(std::is_same_v<T, bool>) {
             out = lua_toboolean(L, -1);
         } else if constexpr(std::is_same_v<T, std::string>) {
@@ -1086,6 +1091,219 @@ const luaL_Reg kMonitorFuncs[] = {
     {nullptr, nullptr       },
 };
 
+// ----------------------------------------------------------------------------
+// uwu.input.* functions
+// ----------------------------------------------------------------------------
+
+// String <-> libinput_config_accel_profile, mirroring parseTransform's
+// shape above. "flat" disables acceleration entirely (1:1 physical-to-
+// logical motion, what most FPS/gaming-mouse users want); "adaptive" is
+// libinput's default speed-dependent curve.
+uint32_t parseAccelProfile(const char* s) {
+    if(!s) { return LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE; }
+    std::string p(s);
+    if(p == "flat") { return LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT; }
+    if(p == "adaptive") { return LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE; }
+    wlr_log(WLR_ERROR,
+            "uwu.input.set: unknown accel_profile '%s', using adaptive",
+            s);
+    return LIBINPUT_CONFIG_ACCEL_PROFILE_ADAPTIVE;
+}
+
+const char* accelProfileToString(uint32_t profile) {
+    return profile == LIBINPUT_CONFIG_ACCEL_PROFILE_FLAT ? "flat" : "adaptive";
+}
+
+uint32_t parseScrollMethod(const char* s) {
+    if(!s) { return LIBINPUT_CONFIG_SCROLL_NO_SCROLL; }
+    std::string m(s);
+    if(m == "two_finger") { return LIBINPUT_CONFIG_SCROLL_2FG; }
+    if(m == "edge") { return LIBINPUT_CONFIG_SCROLL_EDGE; }
+    if(m == "on_button_down") { return LIBINPUT_CONFIG_SCROLL_ON_BUTTON_DOWN; }
+    if(m == "none") { return LIBINPUT_CONFIG_SCROLL_NO_SCROLL; }
+    wlr_log(
+        WLR_ERROR, "uwu.input.set: unknown scroll_method '%s', ignoring", s);
+    return LIBINPUT_CONFIG_SCROLL_NO_SCROLL;
+}
+
+const char* scrollMethodToString(uint32_t method) {
+    switch(method) {
+        case LIBINPUT_CONFIG_SCROLL_2FG:
+            return "two_finger";
+        case LIBINPUT_CONFIG_SCROLL_EDGE:
+            return "edge";
+        case LIBINPUT_CONFIG_SCROLL_ON_BUTTON_DOWN:
+            return "on_button_down";
+        default:
+            return "none";
+    }
+}
+
+uint32_t parseClickMethod(const char* s) {
+    if(!s) { return LIBINPUT_CONFIG_CLICK_METHOD_NONE; }
+    std::string m(s);
+    if(m == "button_areas") {
+        return LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS;
+    }
+    if(m == "clickfinger") { return LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER; }
+    if(m == "none") { return LIBINPUT_CONFIG_CLICK_METHOD_NONE; }
+    wlr_log(WLR_ERROR, "uwu.input.set: unknown click_method '%s', ignoring", s);
+    return LIBINPUT_CONFIG_CLICK_METHOD_NONE;
+}
+
+const char* clickMethodToString(uint32_t method) {
+    switch(method) {
+        case LIBINPUT_CONFIG_CLICK_METHOD_BUTTON_AREAS:
+            return "button_areas";
+        case LIBINPUT_CONFIG_CLICK_METHOD_CLICKFINGER:
+            return "clickfinger";
+        default:
+            return "none";
+    }
+}
+
+// uwu.input.set(match, {tap=, tap_drag=, tap_drag_lock=, natural_scroll=,
+// dwt=, left_handed=, middle_emulation=, accel_speed=, accel_profile=,
+// scroll_method=, scroll_button=, click_method=}). `match` is an exact
+// wlr_input_device name, "type:touchpad"/"type:mouse", or "*" -- see
+// InputRule's doc comment in lua_config.hpp for precedence when several
+// rules could apply to the same device. Safe to call repeatedly for the
+// same `match`: a later call replaces the earlier rule outright (same
+// semantics as uwu.monitor.set()), and is applied immediately to every
+// already-connected matching device, not just future ones.
+int l_input_set(lua_State* L) {
+    const char* match = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    InputRule rule;
+    rule.match = match;
+
+    getOptionalField(L, 2, "tap", rule.tap, rule.has_tap);
+    getOptionalField(L, 2, "tap_drag", rule.tap_drag, rule.has_tap_drag);
+    getOptionalField(
+        L, 2, "tap_drag_lock", rule.tap_drag_lock, rule.has_tap_drag_lock);
+    getOptionalField(
+        L, 2, "natural_scroll", rule.natural_scroll, rule.has_natural_scroll);
+    getOptionalField(L, 2, "dwt", rule.dwt, rule.has_dwt);
+    getOptionalField(
+        L, 2, "left_handed", rule.left_handed, rule.has_left_handed);
+    getOptionalField(L,
+                     2,
+                     "middle_emulation",
+                     rule.middle_emulation,
+                     rule.has_middle_emulation);
+    getOptionalField(
+        L, 2, "accel_speed", rule.accel_speed, rule.has_accel_speed);
+    getOptionalField(
+        L, 2, "scroll_button", rule.scroll_button, rule.has_scroll_button);
+
+    lua_getfield(L, 2, "accel_profile");
+    if(!lua_isnil(L, -1)) {
+        rule.has_accel_profile = true;
+        rule.accel_profile     = parseAccelProfile(luaL_checkstring(L, -1));
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "scroll_method");
+    if(!lua_isnil(L, -1)) {
+        rule.has_scroll_method = true;
+        rule.scroll_method     = parseScrollMethod(luaL_checkstring(L, -1));
+    }
+    lua_pop(L, 1);
+
+    lua_getfield(L, 2, "click_method");
+    if(!lua_isnil(L, -1)) {
+        rule.has_click_method = true;
+        rule.click_method     = parseClickMethod(luaL_checkstring(L, -1));
+    }
+    lua_pop(L, 1);
+
+    LuaConfig* cfg = getConfig(L);
+    auto       it =
+        std::find_if(cfg->input_rules.begin(),
+                     cfg->input_rules.end(),
+                     [&](const InputRule& r) { return r.match == rule.match; });
+    if(it != cfg->input_rules.end()) {
+        *it = rule;
+    } else {
+        cfg->input_rules.push_back(rule);
+    }
+
+    // Apply immediately to every already-connected device this rule now
+    // *wins* for (per findInputRule's exact > type > wildcard precedence)
+    // -- a rule set from a keybind (e.g. a "toggle natural scroll" bind)
+    // should take effect on the current session, not just future
+    // replugs. Compared by `match` string rather than rule pointer/
+    // iterator identity, since the push_back above may have reallocated
+    // cfg->input_rules and invalidated `it`.
+    Server* server = getServer(L);
+    for(auto& dev : server->input_devices) {
+        bool             touchpad = input::isTouchpad(dev->device);
+        const InputRule* winner =
+            input::findInputRule(*server, dev->device, touchpad);
+        if(winner && winner->match == rule.match) {
+            input::applyInputRule(dev->device, rule);
+        }
+    }
+    return 0;
+}
+
+// uwu.input.list() -> array of {name, type ("touchpad"/"mouse"), tap,
+// natural_scroll, left_handed, accel_speed, accel_profile} for every
+// currently connected pointer device. Read back directly from libinput
+// rather than from stored rules, so it reflects the live device state
+// (including anything set outside uwuwm, or a device with no matching
+// rule at all still showing its libinput defaults).
+int l_input_list(lua_State* L) {
+    Server* server = getServer(L);
+    lua_newtable(L);
+    int i = 1;
+    for(auto& dev : server->input_devices) {
+        bool is_libinput = wlr_input_device_is_libinput(dev->device);
+        libinput_device* ldev =
+            is_libinput ? wlr_libinput_get_device_handle(dev->device) : nullptr;
+
+        lua_newtable(L);
+        lua_pushstring(L, dev->device->name);
+        lua_setfield(L, -2, "name");
+
+        bool touchpad = input::isTouchpad(dev->device);
+        lua_pushstring(L, touchpad ? "touchpad" : "mouse");
+        lua_setfield(L, -2, "type");
+
+        if(ldev) {
+            lua_pushboolean(L,
+                            libinput_device_config_tap_get_enabled(ldev) ==
+                                LIBINPUT_CONFIG_TAP_ENABLED);
+            lua_setfield(L, -2, "tap");
+
+            lua_pushboolean(
+                L,
+                libinput_device_config_scroll_get_natural_scroll_enabled(ldev));
+            lua_setfield(L, -2, "natural_scroll");
+
+            lua_pushboolean(L, libinput_device_config_left_handed_get(ldev));
+            lua_setfield(L, -2, "left_handed");
+
+            lua_pushnumber(L, libinput_device_config_accel_get_speed(ldev));
+            lua_setfield(L, -2, "accel_speed");
+
+            lua_pushstring(L,
+                           accelProfileToString(
+                               libinput_device_config_accel_get_profile(ldev)));
+            lua_setfield(L, -2, "accel_profile");
+        }
+        lua_rawseti(L, -2, i++);
+    }
+    return 1;
+}
+
+const luaL_Reg kInputFuncs[] = {
+    {"set",   l_input_set },
+    {"list",  l_input_list},
+    {nullptr, nullptr     },
+};
+
 // uwu.tag.* -- nested the same way uwu.monitor.* already is, for the same
 // reason: "uwu.tag.view(3)" reads as a namespaced action on tags, where
 // the old flat "uwu.view_tag(3)" read more like a typo of "uwu.set" than
@@ -1284,6 +1502,10 @@ void LuaConfig::init(Server& server) {
     lua_setfield(L, -2, "tag");
 
     lua_newtable(L);
+    luaL_setfuncs(L, kInputFuncs, 0);
+    lua_setfield(L, -2, "input");
+
+    lua_newtable(L);
     luaL_setfuncs(L, kClientFuncs, 0);
     lua_setfield(L, -2, "client");
 
@@ -1448,12 +1670,14 @@ bool LuaConfig::reload() {
     lua_State*                          old_L        = L;
     std::multimap<uint32_t, LuaKeybind> old_keybinds = std::move(keybinds);
     std::vector<MonitorRule>            old_rules    = std::move(monitor_rules);
-    std::vector<LuaHook>                old_hooks    = std::move(hooks);
-    RuntimeConfig                       old_settings = settings;
-    int                                 old_next_hook_id = next_hook_id;
+    std::vector<InputRule> old_input_rules           = std::move(input_rules);
+    std::vector<LuaHook>   old_hooks                 = std::move(hooks);
+    RuntimeConfig          old_settings              = settings;
+    int                    old_next_hook_id          = next_hook_id;
 
     keybinds.clear();
     monitor_rules.clear();
+    input_rules.clear();
     hooks.clear();
     next_hook_id = 1;
     settings     = RuntimeConfig{};
@@ -1466,15 +1690,17 @@ bool LuaConfig::reload() {
         if(old_L) { lua_close(old_L); }
         wlr_log(WLR_INFO,
                 "rc.lua reload ok: %zu keybind(s), %zu monitor rule(s), "
-                "%zu hook(s)",
+                "%zu input rule(s), %zu hook(s)",
                 keybinds.size(),
                 monitor_rules.size(),
+                input_rules.size(),
                 hooks.size());
     } else {
         if(L) { lua_close(L); }
         L             = old_L;
         keybinds      = std::move(old_keybinds);
         monitor_rules = std::move(old_rules);
+        input_rules   = std::move(old_input_rules);
         hooks         = std::move(old_hooks);
         next_hook_id  = old_next_hook_id;
         settings      = old_settings;

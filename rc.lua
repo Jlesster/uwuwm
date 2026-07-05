@@ -108,6 +108,41 @@ end)
 -- uwu.monitor.set("eDP-1", { width = 1920, height = 1080, refresh = 144, scale = 1.0 })
 -- uwu.monitor.set("DP-2", { x = 1920, y = 0, width = 2560, height = 1440, refresh = 144, adaptive_sync = true })
 
+-- ── Input device configuration ──────────────────────────────────────────
+-- `match` is an exact libinput device name (see uwu.input.list(), e.g.
+-- from a keybind that dumps it to a notify-send or a log), a type
+-- selector ("type:touchpad" / "type:mouse"), or "*" for a fallback
+-- default applied to any pointer device without a more specific rule --
+-- exact name always wins over type, and type always wins over "*".
+--
+-- Sane touchpad defaults most laptop users want on day one:
+uwu.input.set('type:touchpad', {
+  tap = true, -- tap-to-click
+  tap_drag = true, -- tap-and-hold then move = drag
+  tap_drag_lock = true, -- lift finger mid-drag without dropping it
+  natural_scroll = true, -- content-follows-fingers scroll direction
+  dwt = true, -- ignore touchpad while actively typing
+})
+
+-- Flat (no acceleration curve) pointer response for every mouse by
+-- default -- comment out if you'd rather keep libinput's adaptive curve:
+-- uwu.input.set('type:mouse', { accel_profile = 'flat' })
+
+-- Per-device override example: a gaming mouse where you want 1:1
+-- physical-to-logical motion regardless of the "type:mouse" rule above
+-- (exact name wins). Run `uwu.input.list()` to find the exact name
+-- libinput reports for your own hardware:
+-- uwu.input.set("Logitech G Pro Wireless Gaming Mouse", {
+--     accel_profile = "flat",
+--     accel_speed = 0.0,
+-- })
+
+-- Left-handed mouse, on-button-down scrolling with a specific button,
+-- and clickfinger click detection are also available:
+-- uwu.input.set("*", { left_handed = true })
+-- uwu.input.set("type:touchpad", { click_method = "clickfinger" })
+-- uwu.input.set("type:mouse", { scroll_method = "on_button_down", scroll_button = 274 }) -- BTN_MIDDLE
+
 -- ── Client rules & event hooks ──────────────────────────────────────────
 -- The Client object (uwu.hook("client::*", fn) callbacks get one as their
 -- single argument) is a live, validated wrapper around the underlying
@@ -139,7 +174,7 @@ end)
 -- client, `apply` mutates it. Recognised apply keys: floating (bool),
 -- fullscreen (bool), tag (1..9).
 uwu.rule({
-  match = { app_id = 'mpv' },         -- any app id, or a "~lua-pattern"
+  match = { app_id = 'mpv' }, -- any app id, or a "~lua-pattern"
   apply = { floating = true, tag = 3 },
 })
 uwu.rule({
@@ -162,7 +197,9 @@ uwu.rule({
 local focus_steam_id = uwu.hook('client::focus', function(c)
   if c.app_id == 'steam' then
     -- ensure steam (and only steam) lands on tag 9 when it gets focus
-    if c.tags ~= 256 then c:set_tag(9) end
+    if c.tags ~= 256 then
+      c:set_tag(9)
+    end
   end
 end)
 

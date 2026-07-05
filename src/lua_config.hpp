@@ -89,6 +89,67 @@ struct MonitorRule {
     bool adaptive_sync     = false;
 };
 
+// One uwu.input.set(match, {...}) rule, applied to matching libinput
+// devices as they're plugged in (Server::input_devices / input.cpp's
+// newInputDevice) and re-applied immediately to any already-connected
+// match when the rule is (re)set -- same "store + apply-now-if-live"
+// shape as MonitorRule/Output::applyRule above, just keyed on libinput
+// config knobs instead of wlr_output state.
+//
+// `match` is one of:
+//   - an exact wlr_input_device->name ("Logitech G Pro Wireless Gaming Mouse")
+//   - a type selector: "type:touchpad" or "type:mouse" (pointer devices
+//     only; keyboards don't have a libinput pointer-config surface, so
+//     there's no "type:keyboard" here)
+//   - the wildcard "*", matching any pointer device
+// Precedence when several rules could match the same device: exact name >
+// type selector > wildcard -- see findInputRule in input.cpp.
+//
+// Every field is optional (has_* guards it) exactly like MonitorRule, and
+// each setter is additionally skipped at apply time if libinput reports
+// the underlying device doesn't support that knob at all (e.g.
+// natural-scroll on a device with no scroll capability) -- see
+// applyInputRule's per-field libinput_device_config_*_is_available checks.
+struct InputRule {
+    std::string match;
+
+    bool has_tap = false;
+    bool tap     = false;
+
+    bool has_tap_drag = false;
+    bool tap_drag     = false;
+
+    bool has_tap_drag_lock = false;
+    bool tap_drag_lock     = false;
+
+    bool has_natural_scroll = false;
+    bool natural_scroll     = false;
+
+    bool has_dwt = false;  // disable-while-typing
+    bool dwt     = false;
+
+    bool has_left_handed = false;
+    bool left_handed     = false;
+
+    bool has_middle_emulation = false;
+    bool middle_emulation     = false;
+
+    bool   has_accel_speed = false;
+    double accel_speed     = 0.0;  // libinput range: -1.0 .. 1.0
+
+    bool     has_accel_profile = false;
+    uint32_t accel_profile     = 0;  // libinput_config_accel_profile
+
+    bool     has_scroll_method = false;
+    uint32_t scroll_method     = 0;  // libinput_config_scroll_method
+
+    bool     has_click_method = false;
+    uint32_t click_method     = 0;  // libinput_config_click_method
+
+    bool     has_scroll_button = false;
+    uint32_t scroll_button     = 0;  // linux/input-event-codes.h BTN_* value
+};
+
 // reference into the Lua registry for the callback to invoke. This is the
 // AwesomeWM-equivalent of `awful.key` -- bindings are arbitrary Lua
 // closures, not a closed Action enum, so rc.lua can do anything a real
@@ -216,6 +277,14 @@ public:
     // connected. See lua_config.cpp for the exact-name-wins-over-wildcard
     // matching rule.
     std::vector<MonitorRule> monitor_rules;
+
+    // Populated by uwu.input.set() calls in rc.lua (and by any later
+    // runtime uwu.input.set() calls from keybinds/scripts). Consulted by
+    // input::newInputDevice when a pointer device is (re)plugged in, and
+    // applied immediately by l_input_set to every already-connected
+    // matching device -- see InputRule's doc comment above for the
+    // exact-name > type-selector > wildcard matching rule.
+    std::vector<InputRule> input_rules;
 
     bool reload_pending = false;
 

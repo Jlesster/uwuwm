@@ -9,6 +9,7 @@ extern "C" {
 
 class Server;
 struct wlr_pointer_constraint_v1;
+struct InputRule;  // lua_config.hpp
 
 // One physical keyboard (or keyboard-capable virtual device). wlroots 0.18+
 // lets multiple keyboards exist simultaneously with independent state
@@ -61,6 +62,25 @@ private:
     VoidListener set_region;
 };
 
+// Lightweight tracker for one connected pointer input device (mouse,
+// touchpad, trackball -- anything WLR_INPUT_DEVICE_POINTER). wlr_cursor
+// already aggregates all of them for motion, so this exists purely so
+// uwu.input.set()/uwu.input.list() have a list of live devices to walk
+// (server.input_devices) and so a rule can be re-applied the instant it's
+// set, not just at plug-in time. Owns nothing beyond the destroy
+// listener; the device itself is owned by wlroots' backend.
+struct InputDevice {
+    InputDevice(Server& server, wlr_input_device* device);
+
+    Server&           server;
+    wlr_input_device* device;
+
+private:
+    void handleDestroy();
+
+    VoidListener destroy;
+};
+
 // Pointer/cursor handling is not one persistent object the way Keyboard is
 // -- wlr_cursor already aggregates every pointer device into one logical
 // cursor for us (that's the point of wlr_cursor). These are the
@@ -96,5 +116,27 @@ void newPointerConstraint(Server&                    server,
 // active-state for us. Checked from Keyboard::handleKey before Lua
 // keybind dispatch.
 bool shortcutsInhibited(Server& server);
+
+// Finds the best-matching InputRule for `device` per InputRule's doc
+// comment (exact name > type selector > wildcard), or nullptr if no rule
+// matches. `is_touchpad` distinguishes the "type:touchpad" vs "type:mouse"
+// selector -- see isTouchpad() below for how it's determined.
+const InputRule*
+findInputRule(Server& server, wlr_input_device* device, bool is_touchpad);
+
+// True if `device` is a libinput touchpad (has a nonzero tap
+// finger-count capability), false for anything else including
+// non-libinput-backed pointer devices (nested backend, etc.) -- see
+// applyInputRule for why a non-libinput device is simply a no-op rather
+// than an error.
+bool isTouchpad(wlr_input_device* device);
+
+// Applies every has_*-guarded field of `rule` to `device`'s underlying
+// libinput_device, skipping (with a WLR_DEBUG log) any field the device
+// doesn't support and no-op'ing entirely if `device` isn't
+// libinput-backed at all. Called both from newInputDevice (device
+// plugged in after the rule already existed) and from uwu.input.set()
+// (rule set/changed while the device is already connected).
+void applyInputRule(wlr_input_device* device, const InputRule& rule);
 
 }  // namespace input

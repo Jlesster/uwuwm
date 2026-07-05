@@ -1,6 +1,8 @@
 #include "input.hpp"
 
 extern "C" {
+#include <libinput.h>
+#include <wlr/backend/libinput.h>
 #include <wlr/backend/session.h>
 #include <wlr/types/wlr_cursor.h>
 #include <wlr/types/wlr_idle_notify_v1.h>
@@ -16,6 +18,7 @@ extern "C" {
 #include <wlr/util/log.h>
 }
 
+#include "lua_config.hpp"
 #include "output.hpp"
 #include "server.hpp"
 #include "view.hpp"
@@ -344,10 +347,223 @@ void Keyboard::handleKey(wlr_keyboard_key_event* event) {
 }
 
 // ---------------------------------------------------------------------------
+// InputDevice (pointer device tracking for uwu.input.*)
+// ---------------------------------------------------------------------------
+
+InputDevice::InputDevice(Server& server, wlr_input_device* device)
+    : server(server), device(device) {
+    destroy.connect(&device->events.destroy,
+                    [this](void*) { handleDestroy(); });
+}
+
+void InputDevice::handleDestroy() {
+    Server& srv = server;  // copy the reference out before `this` goes away
+    srv.input_devices.remove_if([this](const std::unique_ptr<InputDevice>& d) {
+        return d.get() == this;
+    });
+}
+
+// ---------------------------------------------------------------------------
 // Cursor / pointer
 // ---------------------------------------------------------------------------
 
 namespace input {
+
+// True if `device`'s libinput backing reports a nonzero tap
+// finger-count -- the standard way to distinguish a touchpad from a
+// mouse/trackball, since libinput doesn't expose a direct "is this a
+// touchpad" query. Non-libinput-backed devices (nested Wayland backend)
+// report false here; they fall through to the "type:mouse"/wildcard
+// selectors below rather than "type:touchpad", which is the safer
+// default for something we can't actually identify.
+bool isTouchpad(wlr_input_device* device) {
+    if(!wlr_input_device_is_libinput(device)) { return false; }
+    libinput_device* dev = wlr_libinput_get_device_handle(device);
+    return libinput_device_config_tap_get_finger_count(dev) > 0;
+}
+
+const InputRule*
+findInputRule(Server& server, wlr_input_device* device, bool is_touchpad) {
+    const char* type_selector = is_touchpad ? "type:touchpad" : "type:mouse";
+    const InputRule* exact    = nullptr;
+    const InputRule* by_type  = nullptr;
+    const InputRule* wildcard = nullptr;
+
+    for(const auto& rule : server.lua_cfg.input_rules) {
+        if(rule.match == device->name) {
+            exact = &rule;
+        } else if(rule.match == type_selector) {
+            by_type = &rule;
+        } else if(rule.match == "*") {
+            wildcard = &rule;
+        }
+    }
+    return exact ? exact : (by_type ? by_type : wildcard);
+}
+
+namespace {
+
+// Every setter below follows the same shape: skip entirely if the rule
+// didn't set this field, then skip (with a debug log, not an error --
+// "this touchpad has no scroll wheel to configure natural-scroll on" is
+// routine, not a misconfiguration) if libinput itself reports the device
+// doesn't support the knob at all.
+void applyTap(libinput_device* dev, const InputRule& r) {
+    if(!r.has_tap) { return; }
+    if(libinput_device_config_tap_get_finger_count(dev) == 0) {
+        wlr_log(WLR_DEBUG, "input device has no tap support, ignoring tap=");
+        return;
+    }
+    libinput_device_config_tap_set_enabled(
+        dev,
+        r.tap ? LIBINPUT_CONFIG_TAP_ENABLED : LIBINPUT_CONFIG_TAP_DISABLED);
+}
+
+void applyTapDrag(libinput_device* dev, const InputRule& r) {
+    if(!r.has_tap_drag) { return; }
+    libinput_device_config_tap_set_drag_enabled(
+        dev,
+        r.tap_drag ? LIBINPUT_CONFIG_DRAG_ENABLED
+                   : LIBINPUT_CONFIG_DRAG_DISABLED);
+}
+
+void applyTapDragLock(libinput_device* dev, const InputRule& r) {
+    if(!r.has_tap_drag_lock) { return; }
+    libinput_device_config_tap_set_drag_lock_enabled(
+        dev,
+        r.tap_drag_lock ? LIBINPUT_CONFIG_DRAG_LOCK_ENABLED
+                        : LIBINPUT_CONFIG_DRAG_LOCK_DISABLED);
+}
+
+void applyNaturalScroll(libinput_device* dev, const InputRule& r) {
+    if(!r.has_natural_scroll) { return; }
+    if(!libinput_device_config_scroll_has_natural_scroll(dev)) {
+        wlr_log(WLR_DEBUG,
+                "input device has no natural-scroll support, ignoring "
+                "natural_scroll=");
+        return;
+    }
+    libinput_device_config_scroll_set_natural_scroll_enabled(dev,
+                                                             r.natural_scroll);
+}
+
+void applyDwt(libinput_device* dev, const InputRule& r) {
+    if(!r.has_dwt) { return; }
+    if(!libinput_device_config_dwt_is_available(dev)) {
+        wlr_log(WLR_DEBUG,
+                "input device has no disable-while-typing support, "
+                "ignoring dwt=");
+        return;
+    }
+    libinput_device_config_dwt_set_enabled(
+        dev,
+        r.dwt ? LIBINPUT_CONFIG_DWT_ENABLED : LIBINPUT_CONFIG_DWT_DISABLED);
+}
+
+void applyLeftHanded(libinput_device* dev, const InputRule& r) {
+    if(!r.has_left_handed) { return; }
+    if(!libinput_device_config_left_handed_is_available(dev)) {
+        wlr_log(WLR_DEBUG,
+                "input device has no left-handed support, ignoring "
+                "left_handed=");
+        return;
+    }
+    libinput_device_config_left_handed_set(dev, r.left_handed);
+}
+
+void applyMiddleEmulation(libinput_device* dev, const InputRule& r) {
+    if(!r.has_middle_emulation) { return; }
+    if(!libinput_device_config_middle_emulation_is_available(dev)) {
+        wlr_log(WLR_DEBUG,
+                "input device has no middle-emulation support, ignoring "
+                "middle_emulation=");
+        return;
+    }
+    libinput_device_config_middle_emulation_set_enabled(
+        dev,
+        r.middle_emulation ? LIBINPUT_CONFIG_MIDDLE_EMULATION_ENABLED
+                           : LIBINPUT_CONFIG_MIDDLE_EMULATION_DISABLED);
+}
+
+void applyAccelSpeed(libinput_device* dev, const InputRule& r) {
+    if(!r.has_accel_speed) { return; }
+    if(!libinput_device_config_accel_is_available(dev)) {
+        wlr_log(WLR_DEBUG,
+                "input device has no pointer-accel support, ignoring "
+                "accel_speed=");
+        return;
+    }
+    libinput_device_config_accel_set_speed(dev, r.accel_speed);
+}
+
+void applyAccelProfile(libinput_device* dev, const InputRule& r) {
+    if(!r.has_accel_profile) { return; }
+    auto profile = static_cast<libinput_config_accel_profile>(r.accel_profile);
+    if(!(libinput_device_config_accel_get_profiles(dev) & profile)) {
+        wlr_log(WLR_DEBUG,
+                "input device doesn't support requested accel_profile, "
+                "ignoring");
+        return;
+    }
+    libinput_device_config_accel_set_profile(dev, profile);
+}
+
+void applyScrollMethod(libinput_device* dev, const InputRule& r) {
+    if(!r.has_scroll_method) { return; }
+    auto method = static_cast<libinput_config_scroll_method>(r.scroll_method);
+    if(!(libinput_device_config_scroll_get_methods(dev) & method)) {
+        wlr_log(WLR_DEBUG,
+                "input device doesn't support requested scroll_method, "
+                "ignoring");
+        return;
+    }
+    libinput_device_config_scroll_set_method(dev, method);
+    // on-button-down scrolling needs a button to hold; scroll_button is
+    // applied right after so a single uwu.input.set() call with both
+    // fields set works in one shot instead of needing a second call.
+    if(method == LIBINPUT_CONFIG_SCROLL_ON_BUTTON_DOWN && r.has_scroll_button) {
+        libinput_device_config_scroll_set_button(dev, r.scroll_button);
+    }
+}
+
+void applyClickMethod(libinput_device* dev, const InputRule& r) {
+    if(!r.has_click_method) { return; }
+    auto method = static_cast<libinput_config_click_method>(r.click_method);
+    if(!(libinput_device_config_click_get_methods(dev) & method)) {
+        wlr_log(WLR_DEBUG,
+                "input device doesn't support requested click_method, "
+                "ignoring");
+        return;
+    }
+    libinput_device_config_click_set_method(dev, method);
+}
+
+}  // namespace
+
+void applyInputRule(wlr_input_device* device, const InputRule& rule) {
+    if(!wlr_input_device_is_libinput(device)) {
+        // Not libinput-backed (nested Wayland backend, virtual pointer,
+        // etc.) -- there's no config surface to apply to, and that's
+        // expected/routine while developing nested, not an error.
+        wlr_log(WLR_DEBUG,
+                "input device '%s' has no libinput backing, ignoring rule",
+                device->name);
+        return;
+    }
+    libinput_device* dev = wlr_libinput_get_device_handle(device);
+
+    applyTap(dev, rule);
+    applyTapDrag(dev, rule);
+    applyTapDragLock(dev, rule);
+    applyNaturalScroll(dev, rule);
+    applyDwt(dev, rule);
+    applyLeftHanded(dev, rule);
+    applyMiddleEmulation(dev, rule);
+    applyAccelSpeed(dev, rule);
+    applyAccelProfile(dev, rule);
+    applyScrollMethod(dev, rule);
+    applyClickMethod(dev, rule);
+}
 
 void setupCursor(Server& server) {
     server.cursor = wlr_cursor_create();
@@ -590,7 +806,17 @@ void newInputDevice(Server& server, wlr_input_device* device) {
             server.keyboards.push_back(
                 std::make_unique<Keyboard>(server, device));
             break;
-        case WLR_INPUT_DEVICE_POINTER:
+        case WLR_INPUT_DEVICE_POINTER: {
+            wlr_cursor_attach_input_device(server.cursor, device);
+            server.input_devices.push_back(
+                std::make_unique<InputDevice>(server, device));
+            bool touchpad = isTouchpad(device);
+            if(const InputRule* rule =
+                   findInputRule(server, device, touchpad)) {
+                applyInputRule(device, *rule);
+            }
+            break;
+        }
         case WLR_INPUT_DEVICE_TOUCH:
             wlr_cursor_attach_input_device(server.cursor, device);
             break;
