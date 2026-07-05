@@ -73,27 +73,53 @@ a spec, and re-verify against `src/` before trusting an item here for long.
   wlroots' own implementation listens to that output's commit signal and
   notifies bound clients of the resulting mode, so the signal handler is the
   entire integration.
+- **Idle-inhibit is wired (`idle-inhibit-unstable-v1` + `ext-idle-notify-v1`),
+  contrary to the previous version of this file, which claimed neither
+  existed.** `idle.{hpp,cpp}` wraps each live `zwp_idle_inhibitor_v1` and
+  recomputes `wlr_idle_notifier_v1_set_inhibited` from scratch whenever
+  visibility could have changed -- inhibitor create/destroy, but also view
+  map/unmap/minimize and tag-switch, since a video paused on a tag you've
+  switched away from must not keep blocking idle actions forever. See
+  `idle.hpp`'s header comment for why a stable recompute was needed instead of
+  just deriving lifetime from wlroots' own inhibitor list.
+- **Dwindle (Hyprland-style BSP tiling) landed as a second layout engine,** not
+  just master-stack. `dwindle.{hpp,cpp}` is a per-output tree, selected via
+  `uwu.set_layout("dwindle")`, reconciled against the current tiled-view set on
+  every `arrange()` call (there's no separate window-opened/closed tiling hook
+  to hang tree mutation off of).
+  `uwu.dwindle_toggle_split/swap_split/ rotate_split/splitratio/move_to_root`
+  are all live -- see the commented examples already in `rc.lua`. Only
+  compile-verified so far, not smoke-tested against a real session -- see below.
+- **xdg-activation-v1 is wired**, contrary to the previous version of this file,
+  which claimed no cross-client focus-request channel existed. `xdg_activation`
+  in `server.cpp` resolves a `request_activate` event's surface back to a
+  managed `View` and routes it through the same `Server::focusView` every
+  click/alt-tab bind uses, so `session_locked` and the rest of the normal focus
+  guards apply for free. Unmanaged (X11 override-redirect) surfaces are
+  excluded, same as the click-to-focus guard. A launcher or `xdg-desktop-portal`
+  window-activation request can now ask to focus a window on another client's
+  behalf.
+- **wp-cursor-shape-v1 is wired**, contrary to the previous version of this
+  file. `cursor_shape_manager` in `server.cpp` maps a client's named-shape
+  request straight onto the same xcursor theme lookup the rest of the cursor
+  code already used, so newer toolkits that assume this protocol instead of
+  loading their own xcursor theme are covered.
+- **wp-content-type-v1 is wired**, contrary to the previous version of this
+  file, which claimed nothing would act on it. `content_type_manager` in
+  `server.cpp` creates the global, and `output.cpp`'s `focusedWantsGameSync()`
+  queries `wlr_surface_get_content_type_v1` as a second, protocol-level path
+  into `Output::updateAdaptiveSync` alongside the existing "exactly one visible
+  window, and it's focused" heuristic -- so a windowed game sharing a tag with
+  e.g. a chat client no longer loses VRR just because it isn't alone on screen.
 
 ## Quality-of-life you'll want within the first month
 
-- **No idle-inhibit.** Fullscreen video/games can't suppress screen-blank if you
-  run an idle daemon.
 - **No virtual-keyboard/virtual-pointer protocols.** Screen-sharing/remote-
   input-injection tools rely on these; without them, they won't work against
   uwuwm.
-- **No cursor-shape-v1.** Newer client toolkits increasingly assume this instead
-  of drawing/loading their own xcursor theme; absence isn't fatal (xcursor
-  fallback still works) but it's a growing assumption to be behind on.
 - **No fractional-scale-v1.** Only integer output scale is available (see
   `Output::applyRule`); a HiDPI/lodpi mixed-monitor setup is stuck rounding to
   whole-number scale.
-- **No content-type-v1.** No way for a client to hint "I'm a game" for
-  scheduling/vsync decisions; not a blocker today since nothing in this codebase
-  would act on it yet, but it's the hook most compositor-side game-mode
-  heuristics build on.
-- **No xdg-activation.** No cross-client "please focus me, I have a good reason"
-  channel -- a launcher spawning a window can't ask for focus the way it could
-  ask a compositor that implements this.
 
 ## Explicitly out of scope, not gaps
 
@@ -126,6 +152,12 @@ above do.
   reasonable smoke test once you're on a real DRM session --
   nested-inside-Hyprland won't exercise the tearing page-flip path at all, since
   that's a KMS/atomic-commit feature the nested Wayland backend doesn't have.
+- **Dwindle**, now that it builds -- reconcile logic (`dwindle::arrange`) hasn't
+  run against a real, changing window set yet. Worth checking specifically:
+  split orientation flips correctly as windows are added/removed out of
+  insertion order, `uwu.dwindle_move_to_root` behaves with `stable` true/false,
+  and switching `uwu.set_layout()` back and forth between `"master"` and
+  `"dwindle"` mid-session doesn't leave a stale tree around on that output.
 - **Keyboard-shortcuts-inhibit and DPMS**, just added -- not build-verified at
   all yet (no wlroots-0.20 dev environment was available where these were
   written; the API was checked by hand against wlroots' own headers/source, not
@@ -142,6 +174,20 @@ above do.
     wlr-output-power-management-unstable-v1) should blank the output immediately
     and wake it back to its prior mode; confirm the output isn't left disabled
     in `wlr-randr`-equivalent output listings after re-enabling.
+- **xdg-activation, cursor-shape, and content-type** -- all three compile clean
+  against real headers but none has run against a live client yet:
+  - xdg-activation: something that actually issues a token and hands it to a
+    second client (a launcher spawning a window, or a completed background task
+    asking to be focused) should steal focus the same way a click would, and
+    respect `session_locked` the same way. `wlrctl toplevel focus` doesn't
+    exercise this path -- it's foreign-toplevel, a separate protocol.
+  - Cursor-shape: a client that names a shape instead of loading its own xcursor
+    theme (recent GTK4 apps are a good test) should render uwuwm's theme cursor
+    for that shape, not fall back to a default arrow.
+  - Content-type: `mpv --content-type=game` (or any client that hints
+    `CONTENT_TYPE_GAME`) sharing a tag with another visible window should keep
+    VRR on via `focusedWantsGameSync()`, where it would otherwise drop the
+    moment it's not the only visible window.
 
 ## Suggested order of attack
 
@@ -152,8 +198,11 @@ above do.
    main machine.
 3. Smoke-test screencopy (`grim`), data-control (a clipboard manager),
    tearing-control (a Proton game with `vblank_mode=0`), keyboard-shortcuts-
-   inhibit (a remote-desktop/VM client), and DPMS (`wlopm` or equivalent) -- all
-   five are wired and unverified against a live client.
-4. Idle-inhibit, virtual-keyboard/virtual-pointer, cursor-shape-v1,
-   fractional-scale-v1, content-type-v1, xdg-activation -- round these out as
-   they annoy you.
+   inhibit (a remote-desktop/VM client), DPMS (`wlopm` or equivalent), idle-
+   inhibit (an idle daemon + `mpv`/a game), dwindle (switch layouts mid-session,
+   add/remove windows out of order), xdg-activation (a launcher or completed
+   background task requesting focus), cursor-shape (a GTK4 app), and
+   content-type (`mpv --content-type=game`) -- all ten are wired and unverified
+   against a live client.
+4. Virtual-keyboard/virtual-pointer and fractional-scale-v1 -- the two remaining
+   real gaps, round out as they annoy you.
