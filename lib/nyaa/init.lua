@@ -12,6 +12,11 @@
 -- reach the same setting. nyaa.wear() rejects the other five by name
 -- (pointing at paw.defaults() instead) rather than quietly forwarding
 -- them, so that boundary can't drift back open by accident.
+--
+-- nyaa.rule() is the one addition outside that: it's per-*client* border
+-- theming (uwu.rule()'s apply.border_color_active/inactive), not a
+-- global uwu.set() field at all, so it doesn't participate in the
+-- VISUAL_FIELDS/PAW_OWNED_FIELDS partition above.
 
 local nyaa = {}
 
@@ -30,6 +35,18 @@ nyaa.presets = {
   gruvbox_dark = {
     border_color_active = '#fabd2f',
     border_color_inactive = '#3c3836',
+  },
+  gruvbox_light = {
+    border_color_active = '#b57614',
+    border_color_inactive = '#d5c4a1',
+  },
+  nord = {
+    border_color_active = '#88c0d0',
+    border_color_inactive = '#3b4252',
+  },
+  everforest = {
+    border_color_active = '#a7c080',
+    border_color_inactive = '#374247',
   },
 }
 
@@ -51,6 +68,7 @@ local PAW_OWNED_FIELDS = {
   repeat_delay = true,
   terminal = true,
   launcher = true,
+  focus_follows_mouse = true,
 }
 
 -- nyaa.wear({ preset = "catppuccin_mocha", gap = 8, border_width = 2 })
@@ -118,6 +136,55 @@ function nyaa.worn()
     current[name] = uwu.get(name)
   end
   return current
+end
+
+-- nyaa.rule({ when = { app_id = "mpv" }, preset = "nord" })
+-- nyaa.rule({ when = { app_id = "~steam_app_.*" }, border_color_active = "#f38ba8" })
+--
+-- Per-client border theming -- sugar over uwu.rule()'s
+-- apply.border_color_active/border_color_inactive (see l_rule_hook in
+-- lua_config.cpp), the same relationship nyaa.wear() has to the global
+-- uwu.set("border_color_active", ...) pair. `preset` (optional) seeds
+-- both colors from nyaa.presets[name]; explicit border_color_active/
+-- inactive fields override/extend it, same merge order as nyaa.wear().
+-- Only the two color fields are supported here -- floating/fullscreen/
+-- tag/output rules are paw.rule()'s job (or raw uwu.rule()), since those
+-- aren't appearance.
+function nyaa.rule(spec)
+  spec = spec or {}
+  local merged = {}
+
+  if spec.preset then
+    local preset = nyaa.presets[spec.preset]
+    if not preset then
+      local names = {}
+      for name in pairs(nyaa.presets) do
+        table.insert(names, name)
+      end
+      table.sort(names)
+      error(
+        "nyaa.rule: unknown preset '"
+          .. tostring(spec.preset)
+          .. "' (known: "
+          .. table.concat(names, ', ')
+          .. ')'
+      )
+    end
+    merged.border_color_active = preset.border_color_active
+    merged.border_color_inactive = preset.border_color_inactive
+  end
+
+  if spec.border_color_active then
+    merged.border_color_active = spec.border_color_active
+  end
+  if spec.border_color_inactive then
+    merged.border_color_inactive = spec.border_color_inactive
+  end
+
+  return uwu.rule({
+    match = spec.when or {},
+    apply = merged,
+  })
 end
 
 return nyaa

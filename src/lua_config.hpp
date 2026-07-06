@@ -39,6 +39,14 @@ struct RuntimeConfig {
     int    repeat_delay_ms = 600;
     double cursor_size     = 24;
 
+    // Click-to-focus is the default (false) -- matches every other
+    // uwuwm behavior default being "off until rc.lua asks for it".
+    // Consulted once per pointer-motion event in processCursorMotion
+    // (input.cpp); see that call site's comment for why it's safe to
+    // check unconditionally there (no-ops via focusView's own
+    // already-focused guard) rather than needing its own short-circuit.
+    bool focus_follows_mouse = false;
+
     std::string terminal = "wezterm";
     std::string launcher = "fuzzel";
 

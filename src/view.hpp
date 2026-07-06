@@ -109,6 +109,22 @@ struct View {
     bool is_fullscreen = false;
     bool mapped        = false;
 
+    // Per-client border color override, set via uwu.rule()'s
+    // apply.border_color_active/inactive or client.border_color_active/
+    // inactive = "#hex" (see l_client_newindex in lua_config.cpp). Unset
+    // (has_border_override == false) means "use
+    // server.lua_cfg.settings.border_color_{active,inactive}", same as
+    // every view before this existed -- nyaa.rule() (lib/nyaa) is the
+    // Lua-side sugar over this, the same way nyaa.wear() sugars the
+    // global uwu.set("border_color_active", ...) pair. Only one flag
+    // covers both colors rather than two independent has_* fields,
+    // since a rule that wants to override the border at all virtually
+    // always wants both states themed together; add a second has_*
+    // flag here if that assumption turns out wrong.
+    bool     has_border_override            = false;
+    uint32_t border_color_active_override   = 0;
+    uint32_t border_color_inactive_override = 0;
+
     // Set only via setMinimized() (below), which is what
     // wlr-foreign-toplevel-management-v1's request_minimize handler
     // calls -- there's no compositor keybind for this, only a taskbar/
@@ -192,6 +208,18 @@ struct View {
     virtual void         setFullscreenBackend(bool fullscreen) = 0;
     virtual wlr_surface* wlrSurface() const                    = 0;
 
+    // Recomputes and re-applies this view's border color for the given
+    // focused-state -- called internally by setFocused()/setFullscreen()
+    // etc, and also by lua_config.cpp's client.border_color_active/
+    // inactive property setter and uwu.rule()'s border_color_* apply
+    // fields (l_client_newindex/l_rule_hook), which need to refresh the
+    // border immediately after changing has_border_override/
+    // border_color_*_override without waiting for the next focus change.
+    // Public (unlike the rest of this section) specifically because of
+    // that external caller -- everything else below stays a View-only
+    // implementation detail.
+    void updateBorderColor(bool focused, float alpha = 1.0f);
+
 protected:
     // Shared implementations for the request_move/request_resize handlers
     // every backend has (xdg_toplevel and xwayland both expose them) --
@@ -212,8 +240,6 @@ protected:
     // client hasn't unmapped yet, so there's real content to animate
     // rather than needing to snapshot a soon-to-vanish buffer.
     void playCloseAnimation();
-
-    void updateBorderColor(bool focused, float alpha = 1.0f);
 
     // Creates this view's wlr_foreign_toplevel_handle_v1 and wires its
     // request_maximize/request_minimize/request_activate/

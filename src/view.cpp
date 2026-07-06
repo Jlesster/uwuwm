@@ -168,10 +168,16 @@ void View::setFullscreen(bool fullscreen) {
 }
 
 void View::updateBorderColor(bool focused, float alpha) {
+    uint32_t packed;
+    if(has_border_override) {
+        packed = focused ? border_color_active_override
+                         : border_color_inactive_override;
+    } else {
+        packed = focused ? server.lua_cfg.settings.border_color_active
+                         : server.lua_cfg.settings.border_color_inactive;
+    }
     float color[4];
-    colorToRgba(focused ? server.lua_cfg.settings.border_color_active
-                        : server.lua_cfg.settings.border_color_inactive,
-                color);
+    colorToRgba(packed, color);
     color[3] *= alpha;
     for(auto* rect : border_rects) { wlr_scene_rect_set_color(rect, color); }
 }

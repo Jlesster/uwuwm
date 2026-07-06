@@ -7,11 +7,6 @@
 
 local paw = {}
 
--- ── spawn ──────────────────────────────────────────────────────────────
-paw.spawn = uwu.spawn
-paw.quit = uwu.quit
-paw.reload = uwu.reload
-
 -- ── behavior / app defaults ──────────────────────────────────────────────
 -- uwu.set(name, value) covers ten settings total (see kSettingSetters in
 -- lua_config.cpp): five are visual (nyaa.wear()'s job -- gap,
@@ -30,6 +25,7 @@ local BEHAVIOR_FIELDS = {
   repeat_delay = true,
   terminal = true,
   launcher = true,
+  focus_follows_mouse = true,
 }
 
 local NYAA_OWNED_FIELDS = {
@@ -90,28 +86,17 @@ function paw.keys(specs)
 end
 
 -- ── tags ───────────────────────────────────────────────────────────────
--- uwuwm is tag-based, not screen/workspace-based -- paw.tag wraps
--- uwu.tag.* (and uwu.tag_count) under names that read as actions on tags,
--- matching how uwu.tag.* itself is already namespaced.
-paw.tag = {
-  count = uwu.tag_count,
-  view = uwu.tag.view,
-  toggle = uwu.tag.toggle,
-  move_client_here = uwu.tag.move_client_here,
-  close_all = uwu.tag.close_all,
-}
-
 -- paw.tags(fn) -- calls fn(i) once per tag, 1..uwu.tag_count. Mainly for
 -- building the mod+1..9 / mod+shift+1..9 keybind blocks in a for-loop
 -- instead of by hand, e.g.:
 --
 --   local keys = { ... }
 --   paw.tags(function(i)
---     table.insert(keys, { mod, tostring(i), function() paw.tag.view(i) end })
+--     table.insert(keys, { mod, tostring(i), function() uwu.tag.view(i) end })
 --   end)
 --   paw.keys(keys)
 function paw.tags(fn)
-  for i = 1, paw.tag.count do
+  for i = 1, uwu.tag_count do
     fn(i)
   end
 end
@@ -179,48 +164,5 @@ function paw.on(event, fn)
   return uwu.hook(EVENT_ALIASES[event] or event, fn)
 end
 paw.off = uwu.unhook
-
--- ── client actions ───────────────────────────────────────────────────────
--- The focused-client verbs (uwu.kill/focus_next/.../toggle_fullscreen)
--- grouped under one table so a keybind block reads as "paw.client.*"
--- consistently with client:focus()/:kill()/etc on an actual Client
--- userdata (uwu.client.list()/focused()), rather than half the client
--- verbs living on `uwu` directly and half on `uwu.client`.
-paw.client = {
-  list = uwu.client.list,
-  focused = uwu.client.focused,
-  focus_next = uwu.focus_next,
-  focus_prev = uwu.focus_prev,
-  kill = uwu.kill,
-  toggle_floating = uwu.toggle_floating,
-  toggle_fullscreen = uwu.toggle_fullscreen,
-}
-
--- ── layout ───────────────────────────────────────────────────────────────
--- uwu.set_layout()/inc_master() plus the five dwindle_* functions,
--- grouped the way master-stack and dwindle are conceptually grouped
--- (one tiling algorithm per output, dwindle being the one with its own
--- sub-actions) instead of five flat top-level uwu.dwindle_* names.
-paw.layout = {
-  set = uwu.set_layout,
-  inc_master = uwu.inc_master,
-  dwindle = {
-    toggle_split = uwu.dwindle_toggle_split,
-    swap_split = uwu.dwindle_swap_split,
-    rotate_split = uwu.dwindle_rotate_split,
-    split_ratio = uwu.dwindle_splitratio,
-    move_to_root = uwu.dwindle_move_to_root,
-  },
-}
-
--- ── monitors / input ─────────────────────────────────────────────────────
--- These are already well-named at the uwu.* level (uwu.monitor.set/list,
--- uwu.input.set/list) -- re-exported here only so a config that
--- `local paw = require("paw")`s once doesn't also need a bare `uwu`
--- reference just for these two. Both `paw.monitor.set(...)` and
--- `uwu.monitor.set(...)` are the exact same function.
-paw.monitor = uwu.monitor
-paw.input = uwu.input
-paw.focus_monitor = uwu.focus_monitor
 
 return paw

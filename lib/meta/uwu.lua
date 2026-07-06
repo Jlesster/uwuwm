@@ -53,16 +53,17 @@ function uwu.bind(mods, key, fn) end
 
 -- ── settings ─────────────────────────────────────────────────────────────
 
----Sets one of uwuwm's ten runtime settings (see kSettingSetters in
+---Sets one of uwuwm's runtime settings (see kSettingSetters in
 ---lua_config.cpp): "gap", "border_width", "master_factor", "repeat_rate",
 ---"repeat_delay", "cursor_size", "terminal", "launcher",
----"border_color_active", "border_color_inactive". An unknown name is
+---"border_color_active", "border_color_inactive", "background_color",
+---"dwindle_preserve_split", "focus_follows_mouse". An unknown name is
 ---logged and ignored, not an error.
 ---@param name string
 ---@param value string|number|boolean
 function uwu.set(name, value) end
 
----Reads back one of the ten settings uwu.set() accepts. Returns nil (not
+---Reads back one of the settings uwu.set() accepts. Returns nil (not
 ---an error) for an unknown name.
 ---@param name string
 ---@return string|number|boolean|nil
@@ -149,6 +150,8 @@ function uwu.unhook(id) end
 ---@field fullscreen? boolean
 ---@field tag? integer   1-based tag index.
 ---@field output? string  Output name (see uwu.monitor.list()).
+---@field border_color_active? string  "#rrggbb"/"#rrggbbaa". Setting either color seeds both from current global settings first -- see l_rule_hook's comment.
+---@field border_color_inactive? string  "#rrggbb"/"#rrggbbaa".
 
 ---Sugar over uwu.hook("client::manage", ...) -- registers one rule and
 ---returns its hook id (same as uwu.hook()'s return, usable with
@@ -285,6 +288,8 @@ function uwu.input.list() end
 ---@field fullscreen boolean  Writable -- goes through the same code path as uwu.toggle_fullscreen().
 ---@field output? string  Read-only. nil if somehow unassigned.
 ---@field geo uwu.ClientGeo  Read-only.
+---@field border_color_active? string  Read/write, "#rrggbb"/"#rrggbbaa". nil until a rule or a direct write first sets an override; writing either color seeds both from current global settings.
+---@field border_color_inactive? string  Read/write, "#rrggbb"/"#rrggbbaa". See border_color_active.
 local Client = {}
 
 ---Focuses this client.
@@ -319,3 +324,45 @@ function uwu.client.list() end
 ---The currently focused client, or nil if none.
 ---@return uwu.Client|nil
 function uwu.client.focused() end
+
+-- ── system ───────────────────────────────────────────────────────────────
+-- OS/session state (backlight, PipeWire volume), not compositor state --
+-- see the section comment above kSystemBrightnessFuncs in lua_config.cpp
+-- for why this is its own namespace instead of flat on `uwu`.
+
+---@class uwu.system
+uwu.system = {}
+
+---@class uwu.system.brightness
+uwu.system.brightness = {}
+
+---Current backlight brightness as a 0-100 percent, or nil if no
+---/sys/class/backlight device exists.
+---@return integer|nil
+function uwu.system.brightness.get() end
+
+---Sets backlight brightness. Clamped to 1..100 -- 0 is deliberately
+---rejected (see l_system_brightness_set's comment); silent no-op if no
+---backlight device exists or the sysfs write fails (check `uwuwm`'s log
+---for a permissions hint).
+---@param pct integer
+function uwu.system.brightness.set(pct) end
+
+---@class uwu.system.volume
+uwu.system.volume = {}
+
+---Current default sink volume as a 0-100+ percent (can exceed 100 if
+---boosted), or nil if `wpctl` isn't available or the query failed.
+---@return integer|nil
+function uwu.system.volume.get() end
+
+---Sets the default sink volume. Clamped to 0..150.
+---@param pct integer
+function uwu.system.volume.set(pct) end
+
+---Sets mute state on the default sink explicitly.
+---@param mute boolean
+function uwu.system.volume.mute(mute) end
+
+---Toggles mute on the default sink.
+function uwu.system.volume.toggle_mute() end

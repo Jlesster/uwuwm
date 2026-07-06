@@ -31,6 +31,8 @@ extern "C" {
 #include "view.hpp"
 #include "xwayland_view.hpp"
 
+#include <dirent.h>
+
 #include <algorithm>
 #include <cstdio>
 #include <cstdlib>
@@ -73,6 +75,68 @@ void spawnCommand(const char* cmd) {
         execl("/bin/sh", "sh", "-c", cmd, nullptr);
         _exit(127);
     }
+}
+
+// ----------------------------------------------------------------------------
+// uwu.system.* helpers (brightness, volume) -- see kSystemFuncs below.
+// ----------------------------------------------------------------------------
+
+// Synchronous fork+exec+capture, unlike spawnCommand's fire-and-forget --
+// only ever used for short-lived, near-instant queries (wpctl get-volume)
+// where a keybind or a status-bar poll genuinely needs the answer back on
+// the same call, not a callback later. This blocks the compositor's
+// single event-loop thread for as long as the child takes, same tradeoff
+// Awesome's easy_async avoids and Hyprland's hyprctl doesn't need to
+// (it's a separate process) -- acceptable here only because everything
+// this backs (wpctl) returns in low single-digit milliseconds. Don't
+// reach for this for anything that could block on network/disk/a hung
+// process; spawnCommand + a hook/callback is the right shape for that.
+std::string runCommandCapture(const std::string& cmd) {
+    std::string result;
+    FILE*       pipe = popen(cmd.c_str(), "r");
+    if(!pipe) { return result; }
+    char buf[256];
+    while(fgets(buf, sizeof(buf), pipe)) { result += buf; }
+    pclose(pipe);
+    while(!result.empty() && (result.back() == '\n' || result.back() == '\r' ||
+                              result.back() == ' ')) {
+        result.pop_back();
+    }
+    return result;
+}
+
+// Finds the first backlight device under /sys/class/backlight (e.g.
+// "amdgpu_bl1", "intel_backlight") -- there's normally exactly one on a
+// laptop, and uwuwm doesn't try to disambiguate multiple the way
+// brightnessctl's `-d` flag would; add a uwu.system.brightness.set(pct,
+// device) overload if that ever matters. Returns "" if the directory
+// doesn't exist or is empty (desktops with no backlight sysfs node at
+// all), which the caller treats as "no brightness control available."
+std::string findBacklightDevice() {
+    DIR* dir = opendir("/sys/class/backlight");
+    if(!dir) { return ""; }
+    std::string name;
+    while(dirent* entry = readdir(dir)) {
+        std::string d(entry->d_name);
+        if(d == "." || d == "..") { continue; }
+        name = d;
+        break;  // first entry is good enough -- see doc comment above.
+    }
+    closedir(dir);
+    return name;
+}
+
+// Reads a small integer out of /sys/class/backlight/<device>/<file>.
+// Returns -1 on any failure (missing device, permission, non-numeric
+// content) so callers can tell "no backlight" apart from "0%".
+int readBacklightFile(const std::string& device, const char* file) {
+    std::string path = "/sys/class/backlight/" + device + "/" + file;
+    FILE*       f    = fopen(path.c_str(), "r");
+    if(!f) { return -1; }
+    int value = -1;
+    if(fscanf(f, "%d", &value) != 1) { value = -1; }
+    fclose(f);
+    return value;
 }
 
 uint32_t parseModTable(lua_State* L, int idx) {
@@ -200,6 +264,10 @@ const std::unordered_map<std::string, SetterFunc> kSettingSetters = {
      [](lua_State* L, RuntimeConfig& s) {
          s.dwindle_preserve_split = lua_toboolean(L, 2);
      }},
+    {"focus_follows_mouse",
+     [](lua_State* L, RuntimeConfig& s) {
+         s.focus_follows_mouse = lua_toboolean(L, 2);
+     }},
 };
 
 // uwu.get()'s inverse map -- added alongside uwu.set() so a rule/hook can
@@ -257,6 +325,10 @@ const std::unordered_map<std::string, GetterFunc> kSettingGetters = {
     {"dwindle_preserve_split",
      [](lua_State* L, const RuntimeConfig& s) {
          lua_pushboolean(L, s.dwindle_preserve_split);
+     }},
+    {"focus_follows_mouse",
+     [](lua_State* L, const RuntimeConfig& s) {
+         lua_pushboolean(L, s.focus_follows_mouse);
      }},
 };
 
@@ -479,6 +551,26 @@ int l_client_index(lua_State* L) {
         }
         return 1;
     }
+    if(k == "border_color_active") {
+        if(view->has_border_override) {
+            lua_pushstring(
+                L,
+                colorToHexString(view->border_color_active_override).c_str());
+        } else {
+            lua_pushnil(L);
+        }
+        return 1;
+    }
+    if(k == "border_color_inactive") {
+        if(view->has_border_override) {
+            lua_pushstring(
+                L,
+                colorToHexString(view->border_color_inactive_override).c_str());
+        } else {
+            lua_pushnil(L);
+        }
+        return 1;
+    }
     if(k == "geo") {
         lua_newtable(L);
         lua_pushinteger(L, view->geo.x);
@@ -520,6 +612,30 @@ int l_client_newindex(lua_State* L) {
     }
     if(k == "fullscreen") {
         view->setFullscreen(lua_toboolean(L, 3));
+        return 0;
+    }
+    if(k == "border_color_active" || k == "border_color_inactive") {
+        Server* server = getServer(L);
+        // First write on a view with no override yet seeds *both* colors
+        // from the current global settings, so setting only one of the
+        // pair (e.g. just border_color_active = "#f38ba8" for a "danger"
+        // app) doesn't leave the other silently at some earlier default
+        // -- it starts from whatever the rest of the compositor is
+        // currently themed with, same as nyaa.wear() would produce.
+        if(!view->has_border_override) {
+            view->border_color_active_override =
+                server->lua_cfg.settings.border_color_active;
+            view->border_color_inactive_override =
+                server->lua_cfg.settings.border_color_inactive;
+            view->has_border_override = true;
+        }
+        uint32_t color = parseColor(luaL_checkstring(L, 3));
+        if(k == "border_color_active") {
+            view->border_color_active_override = color;
+        } else {
+            view->border_color_inactive_override = color;
+        }
+        view->updateBorderColor(server->focused_view == view);
         return 0;
     }
 
@@ -846,6 +962,135 @@ const luaL_Reg kClientFuncs[] = {
 };
 
 // ----------------------------------------------------------------------------
+// uwu.system.brightness / uwu.system.volume
+// ----------------------------------------------------------------------------
+//
+// Deliberately outside every wlroots/libinput code path this file otherwise
+// touches -- brightness is plain sysfs, volume shells out to `wpctl`
+// (PipeWire's own CLI, not a libpipewire client embedded here) the same
+// way uwu.spawn() already shells out for everything else uwuwm doesn't
+// want to own a client library for. This is uwu.system rather than flat
+// on `uwu` alongside spawn/bind -- it's OS/session state, not compositor
+// state the way uwu.monitor/uwu.input are, and keeping that boundary
+// visible in the namespace matches why those two are already nested.
+//
+// uwu.system.volume.* assumes a PipeWire session (wireplumber's `wpctl`),
+// which is Arch/CachyOS's default audio stack today -- there's no
+// PulseAudio/ALSA fallback. If wpctl isn't on $PATH, get() returns nil and
+// set()/mute() are silent no-ops (same "missing tool, do nothing rather
+// than crash" contract runCommandCapture's empty-string-on-failure return
+// already gives everything downstream).
+
+// uwu.system.brightness.get() -> integer percent 0-100, or nil if no
+// backlight sysfs node exists at all (most desktops).
+int l_system_brightness_get(lua_State* L) {
+    std::string device = findBacklightDevice();
+    if(device.empty()) {
+        lua_pushnil(L);
+        return 1;
+    }
+    int current = readBacklightFile(device, "brightness");
+    int max     = readBacklightFile(device, "max_brightness");
+    if(current < 0 || max <= 0) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushinteger(L, static_cast<lua_Integer>((current * 100.0) / max + 0.5));
+    return 1;
+}
+
+// uwu.system.brightness.set(pct) -- pct clamped to 1..100 (0 is
+// deliberately excluded: sysfs happily accepts a literal 0 and that's
+// indistinguishable from a dead panel/backlight driver until you go
+// find another way to turn the screen back on, so uwuwm just never
+// writes it -- use a DPMS/output-power off, not brightness 0, for
+// "screen off").
+int l_system_brightness_set(lua_State* L) {
+    int pct = static_cast<int>(luaL_checkinteger(L, 1));
+    pct     = std::clamp(pct, 1, 100);
+
+    std::string device = findBacklightDevice();
+    if(device.empty()) {
+        wlr_log(WLR_ERROR, "uwu.system.brightness: no backlight device found");
+        return 0;
+    }
+    int max = readBacklightFile(device, "max_brightness");
+    if(max <= 0) { return 0; }
+
+    int   target = static_cast<int>((pct / 100.0) * max + 0.5);
+    auto  path   = "/sys/class/backlight/" + device + "/brightness";
+    FILE* f      = fopen(path.c_str(), "w");
+    if(!f) {
+        wlr_log(WLR_ERROR,
+                "uwu.system.brightness: cannot write %s (permissions? "
+                "need a udev rule granting your user write access)",
+                path.c_str());
+        return 0;
+    }
+    fprintf(f, "%d", target);
+    fclose(f);
+    return 0;
+}
+
+const luaL_Reg kSystemBrightnessFuncs[] = {
+    {"get",   l_system_brightness_get},
+    {"set",   l_system_brightness_set},
+    {nullptr, nullptr                },
+};
+
+// uwu.system.volume.get() -> integer percent, or nil if wpctl isn't
+// available/the query failed. Parses wpctl's own
+// "Volume: 0.45\n" / "Volume: 0.45 [MUTED]\n" output format.
+int l_system_volume_get(lua_State* L) {
+    std::string out =
+        runCommandCapture("wpctl get-volume @DEFAULT_AUDIO_SINK@ 2>/dev/null");
+    double frac = 0.0;
+    if(out.empty() || sscanf(out.c_str(), "Volume: %lf", &frac) != 1) {
+        lua_pushnil(L);
+        return 1;
+    }
+    lua_pushinteger(L, static_cast<lua_Integer>(frac * 100.0 + 0.5));
+    return 1;
+}
+
+// uwu.system.volume.set(pct) -- pct clamped to 0..150 (wpctl allows
+// boosting past 100%, same headroom wireplumber itself exposes; clamped
+// here rather than left unbounded so a typo'd extra zero can't blast the
+// output to some absurd multiple).
+int l_system_volume_set(lua_State* L) {
+    int pct         = static_cast<int>(luaL_checkinteger(L, 1));
+    pct             = std::clamp(pct, 0, 150);
+    std::string cmd = "wpctl set-volume @DEFAULT_AUDIO_SINK@ " +
+                      std::to_string(pct) + "% 2>/dev/null";
+    spawnCommand(cmd.c_str());
+    return 0;
+}
+
+// uwu.system.volume.mute(bool) -- explicit set, not a toggle (see
+// toggle_mute below for that).
+int l_system_volume_mute(lua_State* L) {
+    bool        mute = lua_toboolean(L, 1);
+    std::string cmd  = std::string("wpctl set-mute @DEFAULT_AUDIO_SINK@ ") +
+                       (mute ? "1" : "0") + " 2>/dev/null";
+    spawnCommand(cmd.c_str());
+    return 0;
+}
+
+int l_system_volume_toggle_mute(lua_State* L) {
+    (void)L;
+    spawnCommand("wpctl set-mute @DEFAULT_AUDIO_SINK@ toggle 2>/dev/null");
+    return 0;
+}
+
+const luaL_Reg kSystemVolumeFuncs[] = {
+    {"get",         l_system_volume_get        },
+    {"set",         l_system_volume_set        },
+    {"mute",        l_system_volume_mute       },
+    {"toggle_mute", l_system_volume_toggle_mute},
+    {nullptr,       nullptr                    },
+};
+
+// ----------------------------------------------------------------------------
 // uwu.hook / uwu.unhook / uwu.rule
 // ----------------------------------------------------------------------------
 
@@ -926,11 +1171,44 @@ int l_rule_hook(lua_State* L) {
     int         tag        = 0;
     bool        has_output = false;
     std::string output_name;
+    bool        has_border_active = false, has_border_inactive = false;
+    std::string border_active_str, border_inactive_str;
     getOptionalField(L, -1, "floating", floating, has_floating);
     getOptionalField(L, -1, "fullscreen", fullscreen, has_fullscreen);
     getOptionalField(L, -1, "tag", tag, has_tag);
     getOptionalField(L, -1, "output", output_name, has_output);
+    getOptionalField(
+        L, -1, "border_color_active", border_active_str, has_border_active);
+    getOptionalField(L,
+                     -1,
+                     "border_color_inactive",
+                     border_inactive_str,
+                     has_border_inactive);
     lua_pop(L, 1);
+
+    // Same seed-both-from-current-globals behavior as the client.
+    // border_color_active/inactive property setter (l_client_newindex)
+    // -- a rule setting only one of the pair still gets a fully-defined
+    // override rather than half of it falling back to global settings.
+    if(has_border_active || has_border_inactive) {
+        Server* server = getServer(L);
+        if(!view->has_border_override) {
+            view->border_color_active_override =
+                server->lua_cfg.settings.border_color_active;
+            view->border_color_inactive_override =
+                server->lua_cfg.settings.border_color_inactive;
+            view->has_border_override = true;
+        }
+        if(has_border_active) {
+            view->border_color_active_override =
+                parseColor(border_active_str.c_str());
+        }
+        if(has_border_inactive) {
+            view->border_color_inactive_override =
+                parseColor(border_inactive_str.c_str());
+        }
+        view->updateBorderColor(server->focused_view == view);
+    }
 
     // Same effects a hand-written client::manage hook could reach for
     // individually (client:set_tag(), client.floating = ...,
@@ -1642,6 +1920,19 @@ void LuaConfig::init(Server& server) {
     lua_newtable(L);
     luaL_setfuncs(L, kClientFuncs, 0);
     lua_setfield(L, -2, "client");
+
+    // uwu.system.{brightness,volume} -- OS/session state, not compositor
+    // state, hence its own top-level namespace rather than living flat
+    // alongside uwu.monitor/uwu.input (see the section comment above
+    // kSystemBrightnessFuncs for why).
+    lua_newtable(L);
+    lua_newtable(L);
+    luaL_setfuncs(L, kSystemBrightnessFuncs, 0);
+    lua_setfield(L, -2, "brightness");
+    lua_newtable(L);
+    luaL_setfuncs(L, kSystemVolumeFuncs, 0);
+    lua_setfield(L, -2, "volume");
+    lua_setfield(L, -2, "system");
 
     lua_setglobal(L, "uwu");
 }

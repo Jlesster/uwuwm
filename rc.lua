@@ -10,10 +10,15 @@
 -- same way AwesomeWM splits core/awful/beautiful/wibox:
 --
 --   uwu   the raw compositor API (uwu.spawn, uwu.bind, uwu.hook,
---         uwu.rule, ... -- documented in full below and in MISSING.md)
---   paw   window-management sugar over `uwu` -- keybind lists, client
---         rules, short-named hooks, tag/layout/client helpers
---   nyaa  aesthetics only -- theme presets, applied via uwu.set()
+--         uwu.rule, uwu.system.*, ... -- documented in full below, in
+--         lib/meta/uwu.lua, and in MISSING.md)
+--   paw   window-management sugar over `uwu` for the handful of things
+--         that need it (keybind lists w/ descriptions, client rules,
+--         short-named hooks) -- not a blanket re-export of uwu.* anymore;
+--         call uwu.monitor/uwu.input/uwu.system/uwu.set_layout/etc
+--         directly, same as this file does below
+--   nyaa  aesthetics only -- theme presets, applied via uwu.set() /
+--         per-client via uwu.rule()
 --
 -- (lib/paw, lib/nyaa -- see extendPackagePath() in lua_config.cpp for
 -- where those get found). A wibox-equivalent (status bar / widgets) is
@@ -51,6 +56,11 @@ local apps = paw.defaults({
   repeat_delay = 600,
   terminal = 'wezterm',
   launcher = 'fuzzel',
+  -- focus_follows_mouse = true, -- uncomment for hover-to-focus instead
+  -- of click-to-focus. Off by default; see uwu.set's doc comment in
+  -- lib/meta/uwu.lua. Menus/tooltips/DND icons never take focus this
+  -- way, and moving over bare desktop leaves the last-focused window
+  -- alone rather than clearing focus.
 })
 
 local terminal = apps.terminal
@@ -70,7 +80,7 @@ local keys = {
     mod,
     'Return',
     function()
-      paw.spawn(terminal)
+      uwu.spawn(terminal)
     end,
     'open a terminal',
   },
@@ -78,22 +88,22 @@ local keys = {
     mod,
     'd',
     function()
-      paw.spawn(launcher)
+      uwu.spawn(launcher)
     end,
     'app launcher',
   },
-  { { 'mod', 'shift' }, 'q', paw.quit, 'quit uwuwm' },
-  { { 'mod', 'shift' }, 'r', paw.reload, 'reload config' },
-  { mod, 'j', paw.client.focus_next, 'focus next window' },
-  { mod, 'k', paw.client.focus_prev, 'focus previous window' },
-  { { 'mod', 'shift' }, 'c', paw.client.kill, 'close focused window' },
-  { mod, 'space', paw.client.toggle_floating, 'toggle floating' },
-  { mod, 'f', paw.client.toggle_fullscreen, 'toggle fullscreen' },
+  { { 'mod', 'shift' }, 'q', uwu.quit, 'quit uwuwm' },
+  { { 'mod', 'shift' }, 'r', uwu.reload, 'reload config' },
+  { mod, 'j', uwu.focus_next, 'focus next window' },
+  { mod, 'k', uwu.focus_prev, 'focus previous window' },
+  { { 'mod', 'shift' }, 'c', uwu.kill, 'close focused window' },
+  { mod, 'space', uwu.toggle_floating, 'toggle floating' },
+  { mod, 'f', uwu.toggle_fullscreen, 'toggle fullscreen' },
   {
     mod,
     'i',
     function()
-      paw.layout.inc_master(0.05)
+      uwu.inc_master(0.05)
     end,
     'grow master area',
   },
@@ -101,7 +111,7 @@ local keys = {
     mod,
     'u',
     function()
-      paw.layout.inc_master(-0.05)
+      uwu.inc_master(-0.05)
     end,
     'shrink master area',
   },
@@ -109,7 +119,7 @@ local keys = {
     mod,
     'Tab',
     function()
-      paw.focus_monitor(1)
+      uwu.focus_monitor(1)
     end,
     'focus next monitor',
   },
@@ -117,7 +127,7 @@ local keys = {
     mod,
     'e',
     function()
-      paw.spawn('emacsclient -c')
+      uwu.spawn('emacsclient -c')
     end,
     'emacsclient',
   },
@@ -125,7 +135,7 @@ local keys = {
     { 'mod', 'shift' },
     's',
     function()
-      paw.spawn(
+      uwu.spawn(
         'grim -g "$(slurp)" ~/Pictures/screenshot-' .. os.time() .. '.png'
       )
     end,
@@ -135,32 +145,75 @@ local keys = {
     mod,
     'l',
     function()
-      paw.spawn('swaylock')
+      uwu.spawn('swaylock')
     end,
     'lock the screen',
   },
 
+  -- volume / brightness -- uwu.system.* (see lib/meta/uwu.lua). Volume
+  -- shells out to wpctl under the hood; brightness reads/writes
+  -- /sys/class/backlight directly. Both are silent no-ops if the
+  -- underlying tool/device isn't there, so these binds are always safe
+  -- to leave in even on a desktop with no backlight.
+  {
+    {},
+    'XF86AudioRaiseVolume',
+    function()
+      uwu.system.volume.set(math.min((uwu.system.volume.get() or 0) + 5, 150))
+    end,
+    'volume up',
+  },
+  {
+    {},
+    'XF86AudioLowerVolume',
+    function()
+      uwu.system.volume.set(math.max((uwu.system.volume.get() or 0) - 5, 0))
+    end,
+    'volume down',
+  },
+  { {}, 'XF86AudioMute', uwu.system.volume.toggle_mute, 'toggle mute' },
+  {
+    {},
+    'XF86MonBrightnessUp',
+    function()
+      uwu.system.brightness.set(
+        math.min((uwu.system.brightness.get() or 0) + 5, 100)
+      )
+    end,
+    'brightness up',
+  },
+  {
+    {},
+    'XF86MonBrightnessDown',
+    function()
+      uwu.system.brightness.set(
+        math.max((uwu.system.brightness.get() or 0) - 5, 1)
+      )
+    end,
+    'brightness down',
+  },
+
   -- dwindle: bound whether or not this output is currently in dwindle
-  -- mode (paw.layout.set("dwindle")/("master") switches per-output --
+  -- mode (uwu.set_layout("dwindle")/("master") switches per-output --
   -- see uwu.set_layout's own comment for why it's per-output, not
   -- global). These are no-ops on a master-stack output.
   {
     { 'mod', 'shift' },
     'space',
-    paw.layout.dwindle.toggle_split,
+    uwu.dwindle_toggle_split,
     'toggle dwindle split orientation',
   },
   {
     { 'mod', 'shift' },
     'j',
-    paw.layout.dwindle.swap_split,
+    uwu.dwindle_swap_split,
     'swap dwindle split',
   },
   {
     mod,
     'r',
     function()
-      paw.layout.dwindle.rotate_split(90)
+      uwu.dwindle_rotate_split(90)
     end,
     'rotate dwindle split 90°',
   },
@@ -174,7 +227,7 @@ paw.tags(function(i)
     mod,
     tostring(i),
     function()
-      paw.tag.view(i)
+      uwu.tag.view(i)
     end,
     'view tag ' .. i,
   })
@@ -182,7 +235,7 @@ paw.tags(function(i)
     { 'mod', 'shift' },
     tostring(i),
     function()
-      paw.tag.move_client_here(i)
+      uwu.tag.move_client_here(i)
     end,
     'move window to tag ' .. i,
   })
@@ -191,7 +244,7 @@ paw.tags(function(i)
       { 'mod', 'ctrl' },
       tostring(i),
       function()
-        paw.tag.toggle(i)
+        uwu.tag.toggle(i)
       end,
       'toggle tag ' .. i,
     })
@@ -200,36 +253,35 @@ end)
 
 paw.keys(keys)
 
--- paw.tag.close_all(n) gracefully closes every window on tag n --
+-- uwu.tag.close_all(n) gracefully closes every window on tag n --
 -- destructive, so it's deliberately not bound to a key here. Wire it up
 -- yourself if you want it, e.g. a dedicated "close everything on tag 9"
 -- bind:
--- paw.keys({ { { "mod", "shift", "ctrl" }, "9", function() paw.tag.close_all(9) end } })
+-- paw.keys({ { { "mod", "shift", "ctrl" }, "9", function() uwu.tag.close_all(9) end } })
 
 -- ── Monitor configuration ───────────────────────────────────────────────
--- Still paw.monitor.* (a direct re-export of uwu.monitor.*) -- output
--- configuration (position/mode/scale/transform/adaptive-sync) is lower
--- level than anything a theme/keybind wrapper should paper over. Run
--- `paw.monitor.list()` (e.g. from a keybind that dumps it to
--- notify-send or a log) to see connected output names before filling
--- these in.
+-- Output configuration (position/mode/scale/transform/adaptive-sync) is
+-- lower level than anything a theme/keybind wrapper should paper over --
+-- straight uwu.monitor.*, no paw sugar over this. Run `uwu.monitor.list()`
+-- (e.g. from a keybind that dumps it to notify-send or a log) to see
+-- connected output names before filling these in.
 --
--- paw.monitor.set("DP-1", {
+-- uwu.monitor.set("DP-1", {
 --     x = 0, y = 0,
 --     width = 2560, height = 1440, refresh = 144,
 --     scale = 1.0,
 --     transform = "normal", -- normal|90|180|270|flipped|flipped-90|...
 --     adaptive_sync = true,
 -- })
--- paw.monitor.set("eDP-1", { x = 2560, y = 0, enabled = true })
--- paw.monitor.set("*", { scale = 1.0 }) -- fallback default for anything else
+-- uwu.monitor.set("eDP-1", { x = 2560, y = 0, enabled = true })
+-- uwu.monitor.set("*", { scale = 1.0 }) -- fallback default for anything else
 
 -- ── Input device configuration ──────────────────────────────────────────
--- `match` is an exact libinput device name (see paw.input.list()), a
+-- `match` is an exact libinput device name (see uwu.input.list()), a
 -- type selector ("type:touchpad" / "type:mouse"), or "*" for a fallback
 -- default applied to any pointer device without a more specific rule --
 -- exact name always wins over type, and type always wins over "*".
-paw.input.set('type:touchpad', {
+uwu.input.set('type:touchpad', {
   tap = true, -- tap-to-click
   tap_drag = true, -- tap-and-hold then move = drag
   tap_drag_lock = true, -- lift finger mid-drag without dropping it
@@ -254,6 +306,12 @@ paw.rule({ when = { app_id = paw.like('steam_app_.*') }, set = { tag = 9 } })
 -- (9) -- one rule instead of naming every file-picker/color-chooser
 -- app_id by hand.
 paw.rule({ when = { floating = true }, set = { tag = 9 } })
+
+-- Per-client border theming -- nyaa.rule(), sugar over uwu.rule()'s
+-- apply.border_color_active/inactive. `preset` seeds both colors from
+-- nyaa.presets; explicit fields override/extend it, same as nyaa.wear().
+nyaa.rule({ when = { app_id = 'mpv' }, border_color_active = '#f9e2af' }) -- catppuccin yellow
+nyaa.rule({ when = { app_id = paw.like('steam_app_.*') }, preset = 'nord' })
 
 -- ── Hooks ──────────────────────────────────────────────────────────────
 -- paw.on(event, fn) is uwu.hook() with short verb names in place of the
@@ -281,11 +339,11 @@ end)
 -- paw.off(focus_steam_id) -- to remove the hook above later.
 
 -- ── Querying current state ─────────────────────────────────────────────
--- paw.client.list() and paw.client.focused() round out the read side --
+-- uwu.client.list() and uwu.client.focused() round out the read side --
 -- the same Client userdata every hook callback gets, so any method on
 -- one of these works too:
 --
---   for _, c in ipairs(paw.client.list()) do
+--   for _, c in ipairs(uwu.client.list()) do
 --     if c.app_id == "slack" and c.output ~= "eDP-1" then
 --       c:move_to_output("eDP-1")
 --     end

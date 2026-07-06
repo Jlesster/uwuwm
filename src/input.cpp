@@ -713,14 +713,30 @@ void processCursorMotion(Server& server, uint32_t time_msec) {
     View*        v = desktopViewAt(
         server, server.cursor->x, server.cursor->y, &surface, &sx, &sy);
 
+    // uwu.set("focus_follows_mouse", true) -- off by default (uwuwm is
+    // click-to-focus otherwise, same as the cursor_button handler above).
+    // Deliberately checked unconditionally on every motion event rather
+    // than only on a surface change: focusView() already no-ops the
+    // moment `v == server.focused_view` (the overwhelmingly common case
+    // -- most motion events happen *within* the already-focused window),
+    // so there's no real cost to skip by special-casing "did the
+    // hovered view change" ourselves here too. Unmanaged surfaces (menus,
+    // tooltips, DND icons) are excluded, same as the click-to-focus path
+    // -- hovering a dropdown shouldn't steal focus from the window
+    // behind it. Hovering bare desktop (v == nullptr, gaps/wallpaper)
+    // intentionally leaves whatever was last focused alone, matching
+    // dwm/Awesome's sloppy-focus behavior, rather than clearing focus
+    // to none.
+    if(server.lua_cfg.settings.focus_follows_mouse && v && !v->unmanaged) {
+        server.focusView(v);
+    }
+
     if(!surface) {
         if(server.active_constraint) { deactivateActiveConstraint(server); }
         wlr_cursor_set_xcursor(server.cursor, server.cursor_mgr, "default");
         wlr_seat_pointer_clear_focus(server.seat);
         return;
     }
-
-    (void)v;
 
     // Constraint (de)activation tracks pointer focus, checked only on an
     // actual focus change rather than every motion event -- cheap, and
