@@ -77,6 +77,14 @@ for i = 1, uwu.tag_count do
   end
 end
 
+-- uwu.tag.close_all(n) gracefully closes every window on tag n --
+-- destructive, so it's deliberately not bound to a key here. Wire it up
+-- yourself if you want it, e.g. a dedicated "close everything on tag 9"
+-- bind:
+-- uwu.bind({ 'mod', 'shift', 'ctrl' }, '9', function()
+--   uwu.tag.close_all(9)
+-- end)
+
 -- Extra utility binds, not in the built-in fallback config:
 uwu.bind({ 'mod' }, 'e', function()
   uwu.spawn('emacsclient -c')
@@ -152,6 +160,9 @@ uwu.input.set('type:touchpad', {
 -- a longer-lived closure (a keybind, a layout rule, a saved hook).
 --
 -- Client fields:
+--   c.id           integer, stable for the client's lifetime -- same id
+--                  `uwuwmctl get_clients` (IPC) reports, so a script can
+--                  correlate the two
 --   c.title        string
 --   c.app_id       string (X11 WM_CLASS is folded into app_id by xwayland_view)
 --   c.is_xwayland  bool, true for X11 clients, false for native xdg-shell
@@ -171,8 +182,13 @@ uwu.input.set('type:touchpad', {
 -- drop down to uwu.hook directly.
 
 -- Walk every mapping rule through the same shape: `match` selects the
--- client, `apply` mutates it. Recognised apply keys: floating (bool),
--- fullscreen (bool), tag (1..9).
+-- client, `apply` mutates it. Recognised match keys: app_id/title (exact
+-- string, or a "~lua-pattern"), floating (bool -- matches whatever
+-- handleMap's own parent/fixed-size/X11-dialog-window-type detection
+-- already decided, *before* this rule's own apply.floating can override
+-- it). Recognised apply keys: floating (bool), fullscreen (bool), tag
+-- (1..9), output (monitor name string, same lookup as
+-- c:move_to_output()).
 uwu.rule({
   match = { app_id = 'mpv' }, -- any app id, or a "~lua-pattern"
   apply = { floating = true, tag = 3 },
@@ -187,6 +203,15 @@ uwu.rule({
 })
 uwu.rule({
   match = { app_id = '~steam_app_.*' }, -- "~" prefix = Lua pattern
+  apply = { tag = 9 },
+})
+-- Anything already auto-detected as floating (a parent window, a
+-- fixed-size dialog, or an X11 client with _NET_WM_WINDOW_TYPE_DIALOG/
+-- UTILITY/SPLASH) that isn't caught by a more specific rule above still
+-- gets parked on the scratch tag -- one rule instead of naming every
+-- file-picker/color-chooser app_id by hand.
+uwu.rule({
+  match = { floating = true },
   apply = { tag = 9 },
 })
 

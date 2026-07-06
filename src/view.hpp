@@ -65,6 +65,14 @@ struct View {
 
     Server& server;
 
+    // Stable for the lifetime of the view, assigned from
+    // Server::next_view_id at construction. Exists so something outside
+    // the process (the IPC socket -- see ipc.hpp) has a way to name a
+    // specific window that survives it being re-tagged/refocused/moved,
+    // unlike a raw View* (not meaningful across a socket) or app_id
+    // (multiple windows can share one).
+    uint32_t id;
+
     wlr_scene_tree* scene_tree = nullptr;  // outer container, positioned at
                                            // the *outer* (border-inclusive) box
     wlr_scene_tree* border_tree =
@@ -138,6 +146,30 @@ struct View {
     void setFocused(bool focused);
     void setMinimized(bool minimized);
     void close();
+
+    // Canonical floating-toggle setter. Replaces what used to be three
+    // separate hand-rolled copies of "flip is_floating, snapshot
+    // floating_geo, re-arrange" (l_client_newindex's `client.floating =`,
+    // l_toggle_floating's keybind, and l_rule_hook's `apply.floating`) --
+    // see lua_config.cpp. Floating into tiled re-arranges the output;
+    // tiled into floating centers the view over its output at its
+    // current content size via centeredFloatBox() below, which is the
+    // one thing the old l_rule_hook copy never did (a rule floating an
+    // already-mapped, already-tiled window left it at its tiled
+    // position/size instead of centering it). No-op if `floating`
+    // already matches is_floating, or while fullscreened (fullscreen
+    // owns geometry until it's cleared -- see setFullscreen).
+    void setFloating(bool floating);
+
+    // Pure math: a `content_w`x`content_h` (client-visible, border
+    // excluded) box centered on `output`'s layout box, with the border
+    // added back on -- the exact placement every "float, centered" path
+    // wants (initial map, setFloating above). Returns a zeroed box if
+    // `output` is null. `content_w`/`content_h` <= 0 fall back to a
+    // sane default (480x360) the same way the old inline handleMap copies
+    // of this math already did for a client that hasn't committed a real
+    // size yet.
+    wlr_box centeredFloatBox(int content_w, int content_h) const;
 
     // Workspace/tag-switch slide helpers -- see Output::setTagset.
     // playSlideOut: animate from `geo` by (dx, dy) then disable the node

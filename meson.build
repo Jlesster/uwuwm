@@ -29,6 +29,14 @@ xkbcommon_dep = dependency('xkbcommon')
 libinput_dep = dependency('libinput')
 pixman_dep = dependency('pixman-1')
 
+# xcb_intern_atom/xcb_intern_atom_reply for XWaylandView's
+# _NET_WM_WINDOW_TYPE_* dialog detection (xwayland_view.cpp) -- wlr/
+# xwayland.h already declares xcb_size_hints_t et al (transitively
+# pulling in the xcb-icccm headers), but linking libxcb itself isn't
+# implied by linking wlroots, so it needs to be requested explicitly
+# here or xcb_intern_atom is left an undefined symbol at link time.
+xcb_dep = dependency('xcb')
+
 lua_dep = dependency('lua5.4', required: false)
 if not lua_dep.found()
     lua_dep = dependency('lua-5.4', required: false)
@@ -43,6 +51,7 @@ deps = [
     xkbcommon_dep,
     libinput_dep,
     pixman_dep,
+    xcb_dep,
     lua_dep,
 ]
 
@@ -113,6 +122,7 @@ src = files(
     'src/decoration.cpp',
     'src/popup.cpp',
     'src/input.cpp',
+    'src/ipc.cpp',
     'src/layershell.cpp',
     'src/layout.cpp',
     'src/lua_config.cpp',

@@ -47,7 +47,19 @@ struct Output {
     wlr_box usable_box{};  // layout_box minus space reserved by layer-shell
 
     uint32_t tagset = 1;  // bitmask of currently-viewed tags (bit 0 = tag 1)
-    bool     fullscreen_active =
+
+    // Design note: tag *bits* (View::tags) are global -- there's only one
+    // set of 9 tags, not one set per output -- while `tagset` above (which
+    // bits are currently *visible*) is per-output. Nothing stops two
+    // outputs both showing tag 3 at once; a view whose tags include bit 2
+    // becomes visible on every output whose tagset includes it
+    // simultaneously (see View::setTags' enable check and
+    // layout::getTiledViews' output+tagset filter). That's a deliberate
+    // Awesome/dwm-style shared-tag model, not river's per-output-tag
+    // model -- if you want strict per-output tag isolation instead, the
+    // fix is at this layer (give each Output its own tag namespace), not
+    // in View/layout.
+    bool fullscreen_active =
         false;  // is the focused client on this output fullscreened
     bool   adaptive_sync_on = false;
     double master_factor;  // fraction of usable_box width given to the master

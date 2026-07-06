@@ -23,6 +23,7 @@ extern "C" {
 #include "config.hpp"
 #include "dwindle.hpp"
 #include "input.hpp"
+#include "ipc.hpp"
 #include "layout.hpp"
 #include "output.hpp"
 #include "server.hpp"
@@ -442,6 +443,10 @@ int l_client_index(lua_State* L) {
     const char* key  = luaL_checkstring(L, 2);
     std::string k(key);
 
+    if(k == "id") {
+        lua_pushinteger(L, view->id);
+        return 1;
+    }
     if(k == "title") {
         lua_pushstring(L, view->title.c_str());
         return 1;
@@ -510,12 +515,7 @@ int l_client_newindex(lua_State* L) {
     std::string k(key);
 
     if(k == "floating") {
-        bool want = lua_toboolean(L, 3);
-        if(want != view->is_floating && !view->is_fullscreen) {
-            view->is_floating = want;
-            if(want) { view->floating_geo = view->geo; }
-            if(view->output) { layout::arrange(*view->output); }
-        }
+        view->setFloating(lua_toboolean(L, 3));
         return 0;
     }
     if(k == "fullscreen") {
@@ -663,11 +663,7 @@ int l_focus_prev(lua_State* L) { return l_focus_dir(L, -1); }
 int l_toggle_floating(lua_State* L) {
     Server* server = getServer(L);
     View*   t      = server->focused_view;
-    if(t && !t->is_fullscreen) {
-        t->is_floating = !t->is_floating;
-        if(t->is_floating) { t->floating_geo = t->geo; }
-        if(t->output) { layout::arrange(*t->output); }
-    }
+    if(t) { t->setFloating(!t->is_floating); }
     return 0;
 }
 
@@ -777,6 +773,17 @@ int l_move_to_tag(lua_State* L) {
     return 0;
 }
 
+// uwu.tag.close_all(n) -- gracefully closes every mapped, managed window
+// on tag n (1..uwu.tag_count), via Server::closeOnTag. Not bound to a
+// key by default (see closeOnTag's comment in server.cpp) -- deliberately
+// destructive, opt-in only.
+int l_close_all_on_tag(lua_State* L) {
+    int n = static_cast<int>(luaL_checkinteger(L, 1)) - 1;
+    if(n < 0 || n >= cfg::kTagCount) { return 0; }
+    getServer(L)->closeOnTag(1u << n);
+    return 0;
+}
+
 int l_focus_monitor(lua_State* L) {
     int     dir    = static_cast<int>(luaL_optinteger(L, 1, 1));
     Server* server = getServer(L);
@@ -871,15 +878,18 @@ int l_unhook(lua_State* L) {
 // The actual client::manage hook every uwu.rule() call registers. A
 // plain lua_CFunction can't capture C++ state, so the match/apply spec
 // is baked in as Lua-registry-safe *upvalues* instead (1: match app_id
-// pattern string, 2: match title pattern string, 3: the apply table,
-// copied at registration time) via lua_pushcclosure below -- the
-// idiomatic way to parameterize a C closure across many uwu.rule() calls
-// without a separate per-rule struct/registry of our own.
+// pattern string, 2: match title pattern string, 3: has match.floating,
+// 4: match.floating value, 5: the apply table, copied at registration
+// time) via lua_pushcclosure below -- the idiomatic way to parameterize a
+// C closure across many uwu.rule() calls without a separate per-rule
+// struct/registry of our own.
 int l_rule_hook(lua_State* L) {
     View* view = checkClient(L, 1);
 
-    const char* match_app_id = lua_tostring(L, lua_upvalueindex(1));
-    const char* match_title  = lua_tostring(L, lua_upvalueindex(2));
+    const char* match_app_id       = lua_tostring(L, lua_upvalueindex(1));
+    const char* match_title        = lua_tostring(L, lua_upvalueindex(2));
+    bool        has_match_floating = lua_toboolean(L, lua_upvalueindex(3));
+    bool        match_floating     = lua_toboolean(L, lua_upvalueindex(4));
 
     // Exact-string match unless the pattern is prefixed "~", in which
     // case the rest is a genuine Lua pattern run through string.match --
@@ -901,31 +911,62 @@ int l_rule_hook(lua_State* L) {
 
     if(!matches(match_app_id, view->app_id)) { return 0; }
     if(!matches(match_title, view->title)) { return 0; }
+    // Matches against whatever handleMap's floating auto-detection (parent
+    // / fixed-size / X11 dialog window-type -- see toplevel.cpp /
+    // xwayland_view.cpp) already decided, *before* this rule's own
+    // `apply.floating` (if any) can override it below -- lets a rule like
+    // `match = { floating = true }` target "whatever the compositor
+    // already guessed was a dialog," which a plain app_id/title match
+    // can't express at all.
+    if(has_match_floating && view->is_floating != match_floating) { return 0; }
 
-    lua_pushvalue(L, lua_upvalueindex(3));  // the `apply` table
-    bool has_floating = false, has_fullscreen = false, has_tag = false;
-    bool floating = false, fullscreen = false;
-    int  tag = 0;
+    lua_pushvalue(L, lua_upvalueindex(5));  // the `apply` table
+    bool        has_floating = false, has_fullscreen = false, has_tag = false;
+    bool        floating = false, fullscreen = false;
+    int         tag        = 0;
+    bool        has_output = false;
+    std::string output_name;
     getOptionalField(L, -1, "floating", floating, has_floating);
     getOptionalField(L, -1, "fullscreen", fullscreen, has_fullscreen);
     getOptionalField(L, -1, "tag", tag, has_tag);
+    getOptionalField(L, -1, "output", output_name, has_output);
     lua_pop(L, 1);
 
-    // Same three effects a hand-written client::manage hook could reach
-    // for individually (client:set_tag(), client.floating = ...,
-    // client.fullscreen = ...) -- deliberately going through the exact
-    // same code paths (View::setTags / the floating branch mirrored from
-    // l_client_newindex / View::setFullscreen) rather than a separate
-    // "apply a rule" implementation that could drift from what a manual
-    // hook does.
+    // Same effects a hand-written client::manage hook could reach for
+    // individually (client:set_tag(), client.floating = ...,
+    // client:move_to_output(), client.fullscreen = ...) -- deliberately
+    // going through the exact same code paths (View::setTags /
+    // View::setFloating / l_client_move_to_output's lookup loop /
+    // View::setFullscreen) rather than a separate "apply a rule"
+    // implementation that could drift from what a manual hook does.
+    if(has_output) {
+        Server* server = getServer(L);
+        for(auto& out : server->outputs) {
+            if(output_name == out->wlr_output->name) {
+                // Force back to tiled on the new output regardless of
+                // prior state: a floating window's geo is an absolute
+                // position on its *old* output's layout box, which is
+                // meaningless once `output` changes -- if this rule also
+                // sets `apply.floating = true`, the has_floating branch
+                // below re-floats (and re-centers, via setFloating) on
+                // the *new* output correctly, after this.
+                view->is_floating = false;
+                view->output      = out.get();
+                view->setTags(out->tagset);
+                break;
+            }
+        }
+    }
     if(has_tag && tag >= 1 && tag <= cfg::kTagCount) {
         view->setTags(1u << (tag - 1));
     }
-    if(has_floating && floating != view->is_floating && !view->is_fullscreen) {
-        view->is_floating = floating;
-        if(floating) { view->floating_geo = view->geo; }
-        if(view->output) { layout::arrange(*view->output); }
-    }
+    // setFloating (view.cpp) centers the view over its output when
+    // floating turns on -- fixing what used to be a real bug here: this
+    // branch used to just flip is_floating and re-arrange, which left a
+    // rule-floated window sitting at wherever tiling had placed it
+    // instead of centered, unlike a window that floats from the moment
+    // it maps (see XdgToplevel::handleMap / XWaylandView::handleMap).
+    if(has_floating) { view->setFloating(floating); }
     if(has_fullscreen) { view->setFullscreen(fullscreen); }
 
     return 0;
@@ -955,16 +996,29 @@ int l_rule(lua_State* L) {
     std::string match_app_id = readMatchField("app_id");
     std::string match_title  = readMatchField("title");
 
+    // match.floating is tri-state (unset/true/false), unlike app_id/title
+    // which use "" as their unconstrained sentinel -- floating is a bool
+    // field, so it needs an explicit has_value flag rather than reusing
+    // an empty-string sentinel.
+    bool has_match_floating = false, match_floating = false;
+    lua_getfield(L, 1, "match");
+    if(!lua_isnil(L, -1)) {
+        getOptionalField(L, -1, "floating", match_floating, has_match_floating);
+    }
+    lua_pop(L, 1);
+
     lua_pushstring(L, match_app_id.c_str());  // upvalue 1
     lua_pushstring(L, match_title.c_str());   // upvalue 2
+    lua_pushboolean(L, has_match_floating);   // upvalue 3
+    lua_pushboolean(L, match_floating);       // upvalue 4
 
-    lua_getfield(L, 1, "apply");  // upvalue 3
+    lua_getfield(L, 1, "apply");  // upvalue 5
     if(lua_isnil(L, -1)) {
         lua_pop(L, 1);
-        lua_newtable(L);  // keep upvalue 3 always-a-table, never nil
+        lua_newtable(L);  // keep upvalue 5 always-a-table, never nil
     }
 
-    lua_pushcclosure(L, l_rule_hook, 3);
+    lua_pushcclosure(L, l_rule_hook, 5);
     int ref = luaL_ref(L, LUA_REGISTRYINDEX);
 
     int id = getConfig(L)->addHook("client::manage", ref);
@@ -1312,10 +1366,11 @@ const luaL_Reg kInputFuncs[] = {
 // uwu.client:set_tag(n) -- this one moves *the focused client* to a tag,
 // not a tag to anywhere.
 const luaL_Reg kTagFuncs[] = {
-    {"view",             l_view_tag   },
-    {"toggle",           l_toggle_tag },
-    {"move_client_here", l_move_to_tag},
-    {nullptr,            nullptr      },
+    {"view",             l_view_tag        },
+    {"toggle",           l_toggle_tag      },
+    {"move_client_here", l_move_to_tag     },
+    {"close_all",        l_close_all_on_tag},
+    {nullptr,            nullptr           },
 };
 
 const luaL_Reg kuwuwmFuncs[] = {
@@ -1422,17 +1477,31 @@ end
 -- capturing a Client in a longer-lived closure is always safe.
 --
 -- uwu.rule() is sugar over uwu.hook("client::manage", ...) -- one
--- `match` block (app_id, title; "~foo" = Lua pattern) selects the
--- client, the `apply` block mutates it (floating/fullscreen/tag).
--- See rc.lua for the full Client field/method list and all event names.
+-- `match` block (app_id, title -- "~foo" = Lua pattern; floating --
+-- true/false to match whatever handleMap's own dialog/fixed-size
+-- detection already decided) selects the client, the `apply` block
+-- mutates it (floating/fullscreen/tag/output). See rc.lua for the full
+-- Client field/method list and all event names.
 
--- Dialogs/transients (anything with a parent) and pavucontrol-style
--- settings windows: float, centered, on the focused output.
+-- Dialogs/transients (anything with a parent), fixed-size utility
+-- windows, and X11 clients that set _NET_WM_WINDOW_TYPE_DIALOG/UTILITY/
+-- SPLASH already float themselves automatically -- no rule needed. This
+-- one just also centers pavucontrol, which doesn't set any of those.
 uwu.rule({ match = { app_id = "pavucontrol" }, apply = { floating = true } })
 
 -- Keep media players (mpv) on tag 3 so the launcher always knows where
 -- to find them; float so resizing the player doesn't reshuffle tiling.
 uwu.rule({ match = { app_id = "mpv" }, apply = { floating = true, tag = 3 } })
+
+-- Anything the compositor already auto-detected as a dialog (see
+-- match.floating above) gets parked on the scratch tag (9) instead of
+-- wherever it happened to open -- handy for keeping one-off file
+-- pickers/color choosers out of the way without naming every app_id.
+uwu.rule({ match = { floating = true }, apply = { tag = 9 } })
+
+-- Pin a chat client to a specific monitor regardless of which output was
+-- focused when it launched.
+-- uwu.rule({ match = { app_id = "discord" }, apply = { output = "DP-1" } })
 
 -- A hook for the same surface -- anything uwu.rule can't express (a
 -- conditional tag move, a focus-side effect, ...) drops down to
@@ -1485,14 +1554,14 @@ void LuaConfig::init(Server& server) {
     lua_pushinteger(L, cfg::kTagCount);
     lua_setfield(L, -2, "tag_count");
 
-    // uwu.monitor.{set,list}, uwu.tag.{view,toggle,move_client_here}, and
-    // uwu.client.{list,focused} all live in their own subtables rather
-    // than flat in `uwu` alongside spawn/bind/etc -- "uwu.monitor.set(...)"
-    // reads much closer to wlr-randr/Hyprland monitor-config syntax than a
-    // flat "uwu.set_monitor(...)" would, and namespacing the rest the same
-    // way keeps the top-level table from becoming an undifferentiated
-    // pile as more gets added (see uwu.hook's event names, which follow
-    // this same "namespace::action" shape for the same reason).
+    // uwu.monitor.{set,list}, uwu.tag.{view,toggle,move_client_here,close_all},
+    // and uwu.client.{list,focused} all live in their own subtables rather than
+    // flat in `uwu` alongside spawn/bind/etc -- "uwu.monitor.set(...)" reads
+    // much closer to wlr-randr/Hyprland monitor-config syntax than a flat
+    // "uwu.set_monitor(...)" would, and namespacing the rest the same way keeps
+    // the top-level table from becoming an undifferentiated pile as more gets
+    // added (see uwu.hook's event names, which follow this same
+    // "namespace::action" shape for the same reason).
     lua_newtable(L);
     luaL_setfuncs(L, kMonitorFuncs, 0);
     lua_setfield(L, -2, "monitor");
@@ -1619,6 +1688,12 @@ void LuaConfig::fireClientEvent(const std::string& event, View* view) {
         pushClient(L, view);
         guardedCall(1);
     }
+    // IPC subscribers (ipc.hpp) get told about the same event, right
+    // here, rather than every call site above (toplevel.cpp,
+    // xwayland_view.cpp, view.cpp, server.cpp) separately remembering to
+    // notify both systems -- this function *is* "client::event just
+    // happened," Lua hooks are one consumer of that and IPC is another.
+    if(server_->ipc) { server_->ipc->onClientEvent(event, view); }
 }
 
 void LuaConfig::fireOutputEvent(const std::string& event, Output* output) {
@@ -1630,6 +1705,9 @@ void LuaConfig::fireOutputEvent(const std::string& event, Output* output) {
         lua_rawgeti(L, LUA_REGISTRYINDEX, fn_ref);
         lua_pushstring(L, output->wlr_output->name);
         guardedCall(1);
+    }
+    if(server_->ipc) {
+        server_->ipc->onOutputEvent(event, output->wlr_output->name);
     }
 }
 
@@ -1643,6 +1721,9 @@ void LuaConfig::fireTagChange(Output* output, uint32_t new_tagset) {
         lua_pushstring(L, output->wlr_output->name);
         lua_pushinteger(L, new_tagset);
         guardedCall(2);
+    }
+    if(server_->ipc) {
+        server_->ipc->onTagChange(output->wlr_output->name, new_tagset);
     }
 }
 

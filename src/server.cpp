@@ -23,6 +23,7 @@ extern "C" {
 #include "decoration.hpp"
 #include "idle.hpp"
 #include "input.hpp"
+#include "ipc.hpp"
 #include "layershell.hpp"
 #include "layout.hpp"
 #include "output.hpp"
@@ -39,10 +40,63 @@ extern "C" {
 #include <cstdlib>
 #include <cstring>
 #include <ctime>
+#include <vector>
 
 Server::Server() = default;
 
 Server::~Server() {
+    // Explicit, and first: IpcServer's destructor removes its
+    // wl_event_source(s) from display's event loop and closes its fds --
+    // it needs `display` (and the event loop it owns) to still be alive
+    // to do that cleanly. Member destructors all run *after* this body,
+    // regardless of declaration order, so without this explicit reset()
+    // here, ~IpcServer() would run after wl_display_destroy() below has
+    // already freed the event loop it's trying to remove a source from.
+    ipc.reset();
+
+    // Every Listener<T> below is a *direct Server member*, so its own
+    // wl_list_remove-on-destroy (Listener::~Listener, listener.hpp) --
+    // like ipc above -- doesn't run until after this whole function body
+    // returns. But backend/seat/cursor/every wlr_*_manager_v1 here is
+    // never destroyed explicitly anywhere in this codebase; they're all
+    // torn down implicitly, *inside* wl_display_destroy() below, via the
+    // wl_display-destroy listener each one registers internally at
+    // creation. That means wl_display_destroy() would otherwise reach
+    // (say) wlr_backend_finish() while Server::new_input is still very
+    // much attached to backend->events.new_input -- which is exactly
+    // what wlr_backend_finish's own
+    // `assert(wl_list_empty(&backend->events.new_input.listener_list))`
+    // catches, aborting the whole process (and, since abort() skips
+    // every bit of terminal-restoring cleanup a clean exit would have
+    // done, leaving the VT it was running on stuck in raw mode).
+    // wlr_seat_destroy/the *_manager_v1 teardown paths don't all assert
+    // the same way, but they're relying on the identical "listener must
+    // already be gone" precondition -- so every one of these gets
+    // disconnected here, not just the one that happened to have an
+    // assert catch it.
+    cursor_motion.disconnect();
+    cursor_motion_absolute.disconnect();
+    cursor_button.disconnect();
+    cursor_axis.disconnect();
+    cursor_frame.disconnect();
+    new_output.disconnect();
+    new_xdg_toplevel.disconnect();
+    new_layer_surface.disconnect();
+    new_xwayland_surface.disconnect();
+    xwayland_ready.disconnect();
+    new_session_lock.disconnect();
+    new_pointer_constraint.disconnect();
+    new_toplevel_decoration.disconnect();
+    new_shortcuts_inhibitor.disconnect();
+    output_power_set_mode.disconnect();
+    new_idle_inhibitor.disconnect();
+    new_xdg_activation_request.disconnect();
+    request_set_cursor_shape.disconnect();
+    new_input.disconnect();
+    request_set_cursor.disconnect();
+    request_set_selection.disconnect();
+    session_active_listener.disconnect();
+
     if(session) { wlr_session_destroy(session); }
     if(display) {
         wl_display_destroy_clients(display);
@@ -491,6 +545,20 @@ bool Server::setup() {
     setenv("WAYLAND_DISPLAY", socket, true);
     wlr_log(WLR_INFO, "uwuwm running on WAYLAND_DISPLAY=%s", socket);
 
+    // 9c. IPC socket, last -- deliberately not fatal if it fails (a
+    // stray leftover socket file, a read-only $XDG_RUNTIME_DIR, ...):
+    // uwuwm has run with no IPC since it existed, and a broken IPC
+    // handler shouldn't take down the whole session over it. See
+    // ipc.hpp for the socket path and protocol.
+    ipc = std::make_unique<IpcServer>(*this);
+    if(ipc->socketPath().empty()) {
+        wlr_log(WLR_ERROR, "IPC socket setup failed -- continuing without it");
+        ipc.reset();
+    } else {
+        wlr_log(
+            WLR_INFO, "uwuwm IPC listening on %s", ipc->socketPath().c_str());
+    }
+
     return true;
 }
 
@@ -545,8 +613,8 @@ void Server::focusView(View* view) {
     if(session_locked) { return; }
 
     if(focused_view == view) { return; }
-    View*   prev         = focused_view;
-    Output* prev_output  = prev ? prev->output : nullptr;
+    View*   prev        = focused_view;
+    Output* prev_output = prev ? prev->output : nullptr;
 
     if(prev) { prev->setFocused(false); }
 
@@ -620,11 +688,29 @@ void Server::tickAnimations() {
     for(auto& v : views) { v->tickAnimation(now); }
 }
 
-void Server::closeOnTag(uint32_t /*tagmask*/) {
-    // Placeholder hook for tag-scoped bulk actions (e.g. "close all
-    // windows on tag N"); not bound to a key by default. Left as a clean
-    // extension point rather than wired up, since closeOnTag-by-default
-    // is a destructive action that shouldn't ship bound in config.hpp.
+void Server::closeOnTag(uint32_t tagmask) {
+    // Bulk "close all windows on tag N" -- exposed as uwu.tag.close_all(n)
+    // (lua_config.cpp), deliberately not bound to a key by default since
+    // this is destructive. Requests a graceful close (the same path
+    // client:kill()/the close keybind use, which plays the close
+    // animation and asks the client to shut down) rather than destroying
+    // views directly -- a client that ignores the close request (or is
+    // mid-save) still gets to decide for itself.
+    //
+    // Copies matching views into a separate vector before calling
+    // close() on any of them: close() eventually removes the view from
+    // `views` (once the client actually unmaps), and for an unresponsive
+    // client that never happens synchronously here -- but iterating
+    // `views` directly while a well-behaved client's close() call
+    // reenters and mutates that same list mid-loop is exactly the kind
+    // of "mutate the container you're iterating" bug this sidesteps.
+    std::vector<View*> matching;
+    for(auto& v : views) {
+        if(v->mapped && !v->unmanaged && (v->tags & tagmask)) {
+            matching.push_back(v.get());
+        }
+    }
+    for(View* v : matching) { v->close(); }
 }
 
 void Server::reloadConfig() {

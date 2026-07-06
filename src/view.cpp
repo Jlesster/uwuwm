@@ -29,7 +29,7 @@ void colorToRgba(uint32_t packed, float out[4]) {
 
 }  // namespace
 
-View::View(Server& server) : server(server) {}
+View::View(Server& server) : server(server), id(server.next_view_id++) {}
 
 View::~View() {
     // Safety net for any destruction path that skips handleUnmap (a
@@ -76,6 +76,45 @@ void View::setGeometry(const wlr_box& box) {
     geo = box;
     configureBackend(box);
     applyBoxToScene(box);
+}
+
+wlr_box View::centeredFloatBox(int content_w, int content_h) const {
+    wlr_box box{};
+    if(!output) { return box; }
+
+    int border_px = server.lua_cfg.settings.border_px;
+    int w         = content_w > 0 ? content_w : 480;
+    int h         = content_h > 0 ? content_h : 360;
+
+    box.width  = w + 2 * border_px;
+    box.height = h + 2 * border_px;
+    box.x = output->layout_box.x + (output->layout_box.width - box.width) / 2;
+    box.y = output->layout_box.y + (output->layout_box.height - box.height) / 2;
+    return box;
+}
+
+void View::setFloating(bool floating) {
+    if(is_fullscreen || floating == is_floating) { return; }
+    is_floating = floating;
+
+    if(!floating) {
+        if(output) { layout::arrange(*output); }
+        return;
+    }
+
+    if(!output) { return; }
+
+    // Use the view's current (pre-float, tiled) content size as the
+    // basis for the centered box -- same size, just centered and
+    // detached from the tiling grid, rather than snapping to the
+    // 480x360 default every time something already has a real size.
+    int border_px = server.lua_cfg.settings.border_px;
+    int content_w = geo.width > 2 * border_px ? geo.width - 2 * border_px : 0;
+    int content_h = geo.height > 2 * border_px ? geo.height - 2 * border_px : 0;
+
+    wlr_box box  = centeredFloatBox(content_w, content_h);
+    floating_geo = box;
+    setGeometry(box);
 }
 
 void View::setTags(uint32_t new_tags) {

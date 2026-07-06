@@ -62,6 +62,7 @@ struct wlr_xdg_activation_v1_request_activate_event;
 struct wlr_cursor_shape_manager_v1;
 struct wlr_cursor_shape_manager_v1_request_set_shape_event;
 struct wlr_content_type_manager_v1;
+class IpcServer;
 
 enum class CursorMode {
     Passthrough,
@@ -211,6 +212,13 @@ public:
     std::list<std::unique_ptr<LayerSurface>> layer_surfaces;
     std::list<std::unique_ptr<Keyboard>>     keyboards;
 
+    // Handed out sequentially to View::id at construction (see
+    // view.hpp) -- never reused within one run, so an IPC client
+    // (ipc.hpp) holding a stale id from a since-closed window gets a
+    // clean "no such client" instead of silently addressing whatever
+    // unrelated window happened to reuse that id.
+    uint32_t next_view_id = 1;
+
     // One entry per currently-connected pointer input device (mice,
     // touchpads, trackballs -- anything WLR_INPUT_DEVICE_POINTER), kept
     // around purely so uwu.input.set()/uwu.input.list() have something to
@@ -259,6 +267,14 @@ public:
 
     Output* focused_output = nullptr;
     View*   focused_view   = nullptr;
+
+    // Started at the end of setup() once the Wayland socket name is
+    // known (the IPC socket path is derived from it -- see ipc.cpp) and
+    // torn down implicitly by ~Server() (unique_ptr, forward-declared
+    // type -- same pattern as session_lock above). Null for the entire
+    // lifetime of a run where the socket bind failed (logged, not
+    // fatal): uwuwm runs fine with no IPC, same as it always has.
+    std::unique_ptr<IpcServer> ipc;
 
     CursorMode cursor_mode  = CursorMode::Passthrough;
     View*      grabbed_view = nullptr;

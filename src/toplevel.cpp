@@ -77,12 +77,22 @@ void XdgToplevel::handleMap() {
     output = server.getFocusedOrDefaultOutput();
     if(output) { tags = output->tagset; }
 
-    is_floating = false;
-    if(xdg_toplevel->parent) {
-        // Dialogs / transient children default to floating, centered over
-        // their parent, the way they almost always expect to be placed.
-        is_floating = true;
-    }
+    // Dialogs/transient children (has a parent) default to floating,
+    // centered -- the way they almost always expect to be placed.
+    // Beyond that, a client that pins its min size equal to its max size
+    // is telling us -- via the same xdg_toplevel state every configure
+    // negotiates -- that it never wants to be resized at all, which in
+    // practice is exactly the signal dialog-shaped utility windows (a
+    // save-file picker, a color chooser, a small settings panel with no
+    // parent set) give that a plain app_id/title rule would otherwise
+    // have to hardcode per-client. A window that hasn't announced any
+    // min/max yet (both still 0, xdg-shell's "unconstrained" default)
+    // never matches this.
+    const wlr_xdg_toplevel_state& state = xdg_toplevel->current;
+    bool fixed_size = state.min_width > 0 && state.min_height > 0 &&
+                      state.min_width == state.max_width &&
+                      state.min_height == state.max_height;
+    is_floating     = xdg_toplevel->parent != nullptr || fixed_size;
 
     if(xdg_toplevel->title) { title = xdg_toplevel->title; }
     if(xdg_toplevel->app_id) { app_id = xdg_toplevel->app_id; }
@@ -90,18 +100,9 @@ void XdgToplevel::handleMap() {
     if(output) { layout::arrange(*output); }
 
     if(is_floating && output) {
-        int     border_px = server.lua_cfg.settings.border_px;
-        wlr_box geo_box   = xdg_toplevel->base->geometry;
-        int     w         = geo_box.width > 0 ? geo_box.width : 480;
-        int     h         = geo_box.height > 0 ? geo_box.height : 360;
-
-        wlr_box box;
-        box.width  = w + 2 * border_px;
-        box.height = h + 2 * border_px;
-        box.x =
-            output->layout_box.x + (output->layout_box.width - box.width) / 2;
-        box.y =
-            output->layout_box.y + (output->layout_box.height - box.height) / 2;
+        wlr_box geo_box = xdg_toplevel->base->geometry;
+        wlr_box box     = centeredFloatBox(geo_box.width, geo_box.height);
+        floating_geo    = box;
         setGeometry(box);
     }
 

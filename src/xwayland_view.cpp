@@ -5,6 +5,7 @@ extern "C" {
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
 #include <wlr/util/log.h>
+#include <xcb/xcb_icccm.h>
 }
 
 #include "idle.hpp"
@@ -14,6 +15,77 @@ extern "C" {
 #include "server.hpp"
 
 #include <algorithm>
+#include <cstdlib>
+#include <cstring>
+
+namespace {
+
+// Lazily interned, process-lifetime cache of one _NET_WM_WINDOW_TYPE_*
+// atom name -> id. X atoms are a stable name<->id mapping for the
+// lifetime of the X server (which for Xwayland is uwuwm's own lifetime),
+// so one intern per distinct name, cached in the `static` below, is
+// correct for every XWaylandView for the rest of the session.
+// only_if_exists=1: if wlr's own xwm never interned this name (because no
+// client has ever presented it), there's nothing for us to match against
+// either, so failing the lookup rather than creating a fresh unused atom
+// is the right behavior here.
+xcb_atom_t internAtomCached(xcb_connection_t* conn, const char* name) {
+    xcb_intern_atom_cookie_t cookie =
+        xcb_intern_atom(conn, 1, static_cast<uint16_t>(strlen(name)), name);
+    xcb_intern_atom_reply_t* reply =
+        xcb_intern_atom_reply(conn, cookie, nullptr);
+    xcb_atom_t atom = reply ? reply->atom : XCB_ATOM_NONE;
+    free(reply);
+    return atom;
+}
+
+// True if xsurface's _NET_WM_WINDOW_TYPE property names any of the
+// "should float, not tile" types -- DIALOG (file pickers, color
+// choosers, confirm prompts), UTILITY (tool palettes), and SPLASH (splash
+// screens) cover the vast majority of real-world cases. MENU/TOOLTIP/DND
+// are deliberately excluded: those arrive as override_redirect and are
+// already caught by the `unmanaged` branch in handleMap before this is
+// ever consulted.
+bool isDialogWindowType(Server& server, wlr_xwayland_surface* xsurface) {
+    if(xsurface->window_type_len == 0 || !server.xwayland) { return false; }
+    xcb_connection_t* conn = wlr_xwayland_get_xwm_connection(server.xwayland);
+    if(!conn) { return false; }
+
+    static xcb_atom_t dialog =
+        internAtomCached(conn, "_NET_WM_WINDOW_TYPE_DIALOG");
+    static xcb_atom_t utility =
+        internAtomCached(conn, "_NET_WM_WINDOW_TYPE_UTILITY");
+    static xcb_atom_t splash =
+        internAtomCached(conn, "_NET_WM_WINDOW_TYPE_SPLASH");
+
+    for(size_t i = 0; i < xsurface->window_type_len; i++) {
+        xcb_atom_t t = xsurface->window_type[i];
+        if(t == dialog || t == utility || t == splash) { return true; }
+    }
+    return false;
+}
+
+// True if xsurface has announced (via WM_NORMAL_HINTS) that its min size
+// equals its max size -- ICCCM's way of saying "I never want to be
+// resized," the same signal a fixed-size dialog gives on the XDG side
+// via xdg_toplevel's min/max state (see XdgToplevel::handleMap).
+// xsurface->size_hints is a plain xcb_size_hints_t* (wlroots doesn't
+// wrap it in a type of its own), so unlike xdg_toplevel's state, min/
+// max here are only meaningful if the client actually set the
+// corresponding ICCCM flag bits -- an all-zero, never-touched
+// xcb_size_hints_t would otherwise misread as "0x0 fixed size."
+bool hasFixedSize(wlr_xwayland_surface* xsurface) {
+    xcb_size_hints_t* sh = xsurface->size_hints;
+    if(!sh) { return false; }
+    if(!(sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE) ||
+       !(sh->flags & XCB_ICCCM_SIZE_HINT_P_MAX_SIZE)) {
+        return false;
+    }
+    return sh->min_width > 0 && sh->min_height > 0 &&
+           sh->min_width == sh->max_width && sh->min_height == sh->max_height;
+}
+
+}  // namespace
 
 XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
     : View(server), xsurface(xsurface) {
@@ -115,9 +187,13 @@ void XWaylandView::handleMap() {
             : (server.outputs.empty() ? nullptr : server.outputs.front().get());
     if(output) { tags = output->tagset; }
 
-    // Same rule XdgToplevel uses for dialogs/transients: anything with a
-    // parent floats, centered.
-    is_floating = xsurface->parent != nullptr;
+    // Same rule XdgToplevel uses for dialogs/transients (parent implies
+    // floating), extended with the two signals a plain app_id/title rule
+    // can't express: a fixed min==max size (hasFixedSize) and an
+    // explicit _NET_WM_WINDOW_TYPE of DIALOG/UTILITY/SPLASH
+    // (isDialogWindowType) -- see both above.
+    is_floating = xsurface->parent != nullptr || hasFixedSize(xsurface) ||
+                  isDialogWindowType(server, xsurface);
 
     if(xsurface->title) { title = xsurface->title; }
     if(xsurface->class_) { app_id = xsurface->class_; }
@@ -125,17 +201,8 @@ void XWaylandView::handleMap() {
     if(output) { layout::arrange(*output); }
 
     if(is_floating && output) {
-        int border_px = server.lua_cfg.settings.border_px;
-        int w         = xsurface->width > 0 ? xsurface->width : 480;
-        int h         = xsurface->height > 0 ? xsurface->height : 360;
-
-        wlr_box box;
-        box.width  = w + 2 * border_px;
-        box.height = h + 2 * border_px;
-        box.x =
-            output->layout_box.x + (output->layout_box.width - box.width) / 2;
-        box.y =
-            output->layout_box.y + (output->layout_box.height - box.height) / 2;
+        wlr_box box  = centeredFloatBox(xsurface->width, xsurface->height);
+        floating_geo = box;
         setGeometry(box);
     }
 
@@ -189,9 +256,7 @@ void XWaylandView::handleDestroy() {
     // window's manage was never fired, so its unmanage mustn't be
     // either. See XdgToplevel::handleDestroy for the fire-before-remove
     // ordering rationale.
-    if(!unmanaged) {
-        server.lua_cfg.fireClientEvent("client::unmanage", this);
-    }
+    if(!unmanaged) { server.lua_cfg.fireClientEvent("client::unmanage", this); }
     server.views.remove_if(
         [this](const std::unique_ptr<View>& v) { return v.get() == this; });
 }
