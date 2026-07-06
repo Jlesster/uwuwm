@@ -1,20 +1,24 @@
 #include "popup.hpp"
+
+#include "layershell.hpp"
 #include "view.hpp"
 
 extern "C" {
 #include <wlr/types/wlr_compositor.h>
 }
 
-#include <algorithm>
 #include "server.hpp"
+
+#include <algorithm>
 
 Popup::Popup(Server&         server,
              wlr_xdg_popup*  xdg_popup,
              wlr_scene_tree* parent_tree,
              View*           parent_view,
-             Popup*          parent_popup)
-    : server(server), xdg_popup(xdg_popup),
-      parent_view(parent_view), parent_popup(parent_popup) {
+             Popup*          parent_popup,
+             LayerSurface*   parent_layer)
+    : server(server), xdg_popup(xdg_popup), parent_view(parent_view),
+      parent_popup(parent_popup), parent_layer(parent_layer) {
     scene_tree = wlr_scene_xdg_surface_create(parent_tree, xdg_popup->base);
     xdg_popup->base->data = scene_tree;
 
@@ -39,20 +43,29 @@ void Popup::handleCommit(wlr_surface* /*surface*/) {
 void Popup::handleReposition() {}
 
 void Popup::handleNewPopup(wlr_xdg_popup* popup) {
-    auto child = std::make_unique<Popup>(server, popup, scene_tree, nullptr, this);
+    auto child =
+        std::make_unique<Popup>(server, popup, scene_tree, nullptr, this);
     children.push_back(std::move(child));
 }
 
 void Popup::handleDestroy() {
     if(parent_view) {
         parent_view->popups.erase(
-            std::remove_if(parent_view->popups.begin(), parent_view->popups.end(),
+            std::remove_if(parent_view->popups.begin(),
+                           parent_view->popups.end(),
                            [this](const auto& p) { return p.get() == this; }),
             parent_view->popups.end());
     } else if(parent_popup) {
         parent_popup->children.erase(
-            std::remove_if(parent_popup->children.begin(), parent_popup->children.end(),
+            std::remove_if(parent_popup->children.begin(),
+                           parent_popup->children.end(),
                            [this](const auto& p) { return p.get() == this; }),
             parent_popup->children.end());
+    } else if(parent_layer) {
+        parent_layer->popups.erase(
+            std::remove_if(parent_layer->popups.begin(),
+                           parent_layer->popups.end(),
+                           [this](const auto& p) { return p.get() == this; }),
+            parent_layer->popups.end());
     }
 }

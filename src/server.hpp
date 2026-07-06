@@ -16,6 +16,7 @@ extern "C" {
 #include <wlr/types/wlr_seat.h>
 #include <wlr/types/wlr_subcompositor.h>
 #include <wlr/types/wlr_xcursor_manager.h>
+#include <wlr/types/wlr_xdg_output_v1.h>
 #include <wlr/types/wlr_xdg_shell.h>
 #include <wlr/util/box.h>
 }
@@ -94,6 +95,7 @@ public:
     wlr_allocator*               allocator            = nullptr;
     wlr_compositor*              compositor           = nullptr;
     wlr_output_layout*           output_layout        = nullptr;
+    wlr_xdg_output_manager_v1*   xdg_output_manager   = nullptr;
     wlr_scene*                   scene                = nullptr;
     wlr_scene_output_layout*     scene_layout         = nullptr;
     wlr_xdg_shell*               xdg_shell            = nullptr;

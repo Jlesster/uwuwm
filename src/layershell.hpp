@@ -15,8 +15,12 @@ extern "C" {
 
 #include "listener.hpp"
 
+#include <memory>
+#include <vector>
+
 class Server;
 struct Output;
+struct Popup;
 
 // A layer-shell client: status bars, launchers, ext-session-lock-style
 // overlays. Unlike Toplevels these are never tiled by the layout -- they
@@ -41,6 +45,13 @@ struct LayerSurface {
     // handler) must check this and discard the object rather than storing
     // it, or they end up holding a wrapper around freed memory forever.
     bool valid = true;
+
+    // Popups opened from this layer surface (e.g. a bar's context menu or
+    // tooltip). Owning them here gives Popup::handleDestroy() somewhere to
+    // remove itself from -- without an owner, the Popup wrapper (and the
+    // wl_listener bound to xdg_popup->events.destroy) would never be freed,
+    // and wlroots' destroy_xdg_popup() would assert on the dangling listener.
+    std::vector<std::unique_ptr<Popup>> popups;
 
 private:
     void handleMap();

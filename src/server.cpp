@@ -279,6 +279,13 @@ bool Server::setup() {
 
     output_layout = wlr_output_layout_create(display);
 
+    // Bars/launchers (waybar, quickshell, etc.) query output name/geometry
+    // through zxdg_output_manager_v1 before they'll even try to bind
+    // zwlr_layer_shell_v1 -- without this global they fail their startup
+    // resource check outright, before ever creating a layer surface.
+    xdg_output_manager =
+        wlr_xdg_output_manager_v1_create(display, output_layout);
+
     new_output.connect(
         &backend->events.new_output, [this](wlr_output* wlr_output) {
             outputs.push_back(std::make_unique<Output>(*this, wlr_output));

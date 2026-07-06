@@ -412,9 +412,12 @@ void Output::handleDestroy() {
 void Output::setAdaptiveSync(bool enabled) {
     if(adaptive_sync_on == enabled) { return; }
 
-    // §5.2: only ever toggled on fullscreen enter/exit (see
-    // View::setFullscreen), never left on globally -- avoids the
-    // desktop-content resync flicker the doc calls out.
+    // §5.2: driven by Output::updateAdaptiveSync's sole-visible-window/
+    // game-content-type heuristic (called from layout::arrange on every
+    // arrange, and directly from View::setFullscreen), never left on
+    // globally -- avoids the desktop-content resync flicker the doc
+    // calls out. Guarded by the early-return above so a no-op toggle
+    // never pays for a state commit.
     wlr_output_state state;
     wlr_output_state_init(&state);
     wlr_output_state_set_adaptive_sync_enabled(&state, enabled);
@@ -429,7 +432,7 @@ void Output::updateAdaptiveSync() {
     int   count = 0;
 
     for(auto& v : server.views) {
-        if(!v->mapped || v->output != this) { continue; }
+        if(!v->mapped || v->output != this || v->is_minimized) { continue; }
         if((v->tags & tagset) == 0) { continue; }
         if(++count > 1) { break; }
         only = v.get();

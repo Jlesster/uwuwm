@@ -96,7 +96,9 @@ void LayerSurface::handleCommit(wlr_surface* /*surface*/) {
 }
 
 void LayerSurface::handleNewPopup(wlr_xdg_popup* popup) {
-    new Popup(server, popup, scene_layer_surface->tree);
+    auto child = std::make_unique<Popup>(
+        server, popup, scene_layer_surface->tree, nullptr, nullptr, this);
+    popups.push_back(std::move(child));
 }
 
 void LayerSurface::handleOutputDestroy() { output = nullptr; }

@@ -6,12 +6,37 @@ project(
         'warning_level=3',
         'cpp_std=c++23',
         'buildtype=debugoptimized',
+        # Meson's own default (/usr/local) puts the binary at
+        # /usr/local/bin/uwuwm and the session file at
+        # /usr/local/share/wayland-sessions/uwuwm.desktop -- display
+        # managers (GDM, SDDM, ...) only scan /usr/share/wayland-sessions,
+        # so a /usr/local install is invisible to the login screen even
+        # though the binary itself runs fine by hand. Defaulting to /usr
+        # here means a plain `meson setup build && ninja -C build && sudo
+        # meson install -C build` lands everything where it's actually
+        # read from, with no `-Dprefix=/usr` needed. Override with
+        # `-Dprefix=/usr/local` (or anywhere else) at setup time if you
+        # want the old behavior back for a non-packaged/personal install.
+        'prefix=/usr',
     ],
 )
 
 cpp = meson.get_compiler('cpp')
 
 add_project_arguments('-DWLR_USE_UNSTABLE', language: ['c', 'cpp'])
+
+# Lets lua_config.cpp's extendPackagePath() find lib/awful, lib/beautiful,
+# etc. both when running straight out of the build directory (dev/test,
+# e.g. Jlessica's own `./builddir/uwuwm` workflow -- UWUWM_SRCDIR) and
+# after a real `meson install` (UWUWM_DATADIR, matching the
+# install_subdir('lib', ...) call further down). Quoted so the resulting
+# C++ string literal is exactly the path, not the path parsed as more
+# preprocessor tokens.
+add_project_arguments(
+    '-DUWUWM_SRCDIR="' + meson.current_source_dir() + '"',
+    '-DUWUWM_DATADIR="' + get_option('prefix') / get_option('datadir') / 'uwuwm' + '"',
+    language: ['cpp'],
+)
 
 # ── Dependencies ─────────────────────────────────────────────────────────
 pkgconfig = find_program('pkg-config')
@@ -144,17 +169,13 @@ exe = executable(
 )
 
 # ── Install layout (Standard FHS) ───────────────────────────────────────
-# Default Meson prefix is /usr/local; `meson install` is what writes to
-# the prefix. The expected user flow is:
+# Prefix defaults to /usr (see project()'s default_options above), so
+# `meson install` writes to real, DM/PATH-visible locations with no
+# extra flags:
 #
 #   meson setup build
 #   ninja -C build
-#   sudo meson install        # copies to /usr/bin, /usr/share/...
-#
-# (or, without sudo: `meson configure build -Dprefix=/usr` first; the
-# default /usr/local is for personal installs that don't go through a
-# package manager, but the .desktop file there is invisible to GDM/SDDM
-# which only scan /usr/share/wayland-sessions).
+#   sudo meson install -C build   # copies to /usr/bin, /usr/share/...
 #
 # Files installed:
 #   /usr/bin/uwuwm                       the binary (executable.install: true)
@@ -165,6 +186,10 @@ exe = executable(
 #                                         ~/.config/uwuwm/rc.lua first and
 #                                         the embedded kDefaultConfig only
 #                                         if that doesn't exist).
+#   /usr/share/uwuwm/lib/...             the awful/beautiful/gears Lua
+#                                         library tree (see
+#                                         extendPackagePath() in
+#                                         lua_config.cpp)
 #
 # NOT installed: the autostart script, which is per-user and not part
 # of the shipped tree (the user creates ~/.config/uwuwm/autostart.sh).
@@ -185,4 +210,15 @@ install_data(
     'rc.lua',
     install_dir: get_option('datadir') / 'uwuwm',
     install_mode: 'rw-r--r--',
+)
+
+# The awful/beautiful/gears Lua library tree -- installed so
+# require("awful")/require("beautiful") resolve for every user's rc.lua,
+# not just a from-source checkout. See extendPackagePath() in
+# lua_config.cpp for the exact search order (a user's own
+# ~/.config/uwuwm/lib/ always shadows this copy).
+install_subdir(
+    'lib',
+    install_dir: get_option('datadir') / 'uwuwm',
+    strip_directory: false,
 )

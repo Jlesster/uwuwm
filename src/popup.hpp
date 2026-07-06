@@ -6,11 +6,13 @@ extern "C" {
 }
 
 #include "listener.hpp"
-#include <vector>
+
 #include <memory>
+#include <vector>
 
 class Server;
 struct View;
+struct LayerSurface;
 
 // Popups (menus, tooltips, context menus) are short-lived xdg surfaces
 // parented to a toplevel or to another popup. wlroots positions them for
@@ -21,16 +23,18 @@ struct Popup {
     Popup(Server&         server,
           wlr_xdg_popup*  xdg_popup,
           wlr_scene_tree* parent_tree,
-          View*           parent_view = nullptr,
-          Popup*          parent_popup = nullptr);
+          View*           parent_view  = nullptr,
+          Popup*          parent_popup = nullptr,
+          LayerSurface*   parent_layer = nullptr);
     ~Popup();
 
     Server&         server;
     wlr_xdg_popup*  xdg_popup;
     wlr_scene_tree* scene_tree = nullptr;
 
-    View*           parent_view = nullptr;
-    Popup*          parent_popup = nullptr;
+    View*                               parent_view  = nullptr;
+    Popup*                              parent_popup = nullptr;
+    LayerSurface*                       parent_layer = nullptr;
     std::vector<std::unique_ptr<Popup>> children;
 
 private:

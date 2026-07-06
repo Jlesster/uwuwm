@@ -1523,6 +1523,70 @@ std::string userConfigPath() {
     return {};
 }
 
+// Same resolution order as userConfigPath(), minus the "/rc.lua" suffix
+// -- this is where `require("awful")`/`require("beautiful")` look for a
+// user override of the shipped lib/ tree (e.g. ~/.config/uwuwm/lib/
+// awful/init.lua replacing the built-in one) before falling back to the
+// dev/installed copies extendPackagePath() also adds below.
+std::string userConfigDir() {
+    if(const char* xdg = getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
+        return std::string(xdg) + "/uwuwm";
+    }
+    if(const char* home = getenv("HOME"); home && *home) {
+        return std::string(home) + "/.config/uwuwm";
+    }
+    return {};
+}
+
+// Prepends every place rc.lua's require("awful")/require("beautiful")
+// (and anything either of those transitively requires -- gears.table,
+// etc.) should be found, highest-priority first:
+//
+//   1. <user config dir>/lib/          -- lets a user drop in their own
+//      awful/beautiful (or add a sibling module) that shadows the
+//      shipped one, same override precedence rc.lua itself already has
+//      over the embedded kDefaultConfig.
+//   2. <source tree>/lib/              -- only exists/matters when
+//      running an uninstalled ./builddir/uwuwm straight out of a git
+//      checkout (see UWUWM_SRCDIR in meson.build); harmless to have on
+//      the path for an installed binary too, since that directory
+//      simply won't exist there and Lua's loader silently skips path
+//      entries that don't resolve to a file.
+//   3. <datadir>/uwuwm/lib/            -- the real installed location
+//      (see meson.build's install_subdir('lib', ...)) for a
+//      `meson install`ed uwuwm.
+//
+// then leaves the rest of the interpreter's own default package.path
+// appended after all three, so system-installed third-party Lua
+// libraries (luarocks packages, etc.) are still reachable too.
+void extendPackagePath(lua_State* L) {
+    std::string prefix;
+
+    auto addDir = [&](const std::string& dir) {
+        if(dir.empty()) { return; }
+        prefix += dir + "/?.lua;" + dir + "/?/init.lua;";
+    };
+
+    if(std::string cfg = userConfigDir(); !cfg.empty()) {
+        addDir(cfg + "/lib");
+    }
+#ifdef UWUWM_SRCDIR
+    addDir(std::string(UWUWM_SRCDIR) + "/lib");
+#endif
+#ifdef UWUWM_DATADIR
+    addDir(std::string(UWUWM_DATADIR) + "/lib");
+#endif
+
+    lua_getglobal(L, "package");
+    lua_getfield(L, -1, "path");
+    std::string existing = lua_tostring(L, -1) ? lua_tostring(L, -1) : "";
+    lua_pop(L, 1);
+    std::string combined = prefix + existing;
+    lua_pushstring(L, combined.c_str());
+    lua_setfield(L, -2, "path");
+    lua_pop(L, 1);  // pop `package`
+}
+
 }  // namespace
 
 LuaConfig::LuaConfig() = default;
@@ -1536,6 +1600,7 @@ void LuaConfig::init(Server& server) {
 
     L = luaL_newstate();
     luaL_openlibs(L);
+    extendPackagePath(L);
 
     lua_pushlightuserdata(L, &server);
     lua_setfield(L, LUA_REGISTRYINDEX, kServerKey);
