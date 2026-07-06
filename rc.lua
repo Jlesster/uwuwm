@@ -6,165 +6,230 @@
 -- keeps running on the last-known-good config instead of losing your
 -- keybinds -- see LuaConfig::reload() if you want the details.
 --
--- This file is written against uwuwm's AwesomeWM-shaped Lua library
--- (lib/awful, lib/beautiful, lib/gears -- see extendPackagePath() in
--- lua_config.cpp for where those get found). Everything it does is
--- still just sugar over the raw `uwu` C API (uwu.spawn, uwu.bind,
--- uwu.hook, uwu.rule, ...) documented in full further down and in
--- MISSING.md -- drop to `uwu.*` directly any time the higher-level
--- wrapper doesn't have what you need; the two styles compose freely in
--- the same rc.lua.
+-- This file is written against uwuwm's own small Lua library, split the
+-- same way AwesomeWM splits core/awful/beautiful/wibox:
+--
+--   uwu   the raw compositor API (uwu.spawn, uwu.bind, uwu.hook,
+--         uwu.rule, ... -- documented in full below and in MISSING.md)
+--   paw   window-management sugar over `uwu` -- keybind lists, client
+--         rules, short-named hooks, tag/layout/client helpers
+--   nyaa  aesthetics only -- theme presets, applied via uwu.set()
+--
+-- (lib/paw, lib/nyaa -- see extendPackagePath() in lua_config.cpp for
+-- where those get found). A wibox-equivalent (status bar / widgets) is
+-- reserved for later, not implemented yet. Drop to `uwu.*` directly any
+-- time paw/nyaa don't have what you need -- all three styles compose
+-- freely in the same rc.lua.
 
-local gears = require('gears')
-local awful = require('awful')
-local beautiful = require('beautiful')
+local paw = require('paw')
+local nyaa = require('nyaa')
 
 -- ── Theme ────────────────────────────────────────────────────────────
--- beautiful.init() takes either a path to a separate theme.lua (the
--- AwesomeWM convention -- one file, `return`ing a table, that you can
--- swap out wholesale) or, as here, an inline table if you'd rather keep
--- everything in one file. Every field below is optional; anything you
--- don't set keeps beautiful's own built-in default (which matches
--- RuntimeConfig's compiled-in defaults exactly -- see lib/beautiful/
--- init.lua). Setting these calls straight through to uwu.set() as a
--- side effect of beautiful.apply(), which init() calls automatically.
-beautiful.init({
+-- nyaa.wear() only ever touches the five *visual* uwu.set() fields
+-- (gap, border_width, border_color_active/inactive, cursor_size) --
+-- it'll refuse master_factor/repeat_rate/repeat_delay/terminal/launcher
+-- below with a pointer back to paw.defaults(), which owns those instead.
+-- `preset` (see nyaa.presets for the full list) seeds border colors;
+-- everything else is an override. Every field is optional; anything you
+-- don't set keeps RuntimeConfig's compiled-in default.
+nyaa.wear({
+  preset = 'catppuccin_mocha',
   gap = 8,
   border_width = 2,
+  cursor_size = 24,
+})
+
+-- paw.defaults() owns the five *behavior*/app fields instead --
+-- master_factor (initial tiling ratio), repeat_rate/repeat_delay
+-- (keyboard timing), and terminal/launcher (just the two app strings
+-- your own keybinds below reference). Returns the merged table, so
+-- `paw.defaults({...}).terminal` below is the actual value that got
+-- applied, not just whatever this file happened to pass in.
+local apps = paw.defaults({
   master_factor = 0.55,
-  border_focus = '#cba6f7', -- Catppuccin Mocha mauve
-  border_normal = '#313244', -- Catppuccin Mocha surface0
-  bg_normal = '#11111b', -- Catppuccin Mocha crust
   repeat_rate = 25,
   repeat_delay = 600,
-  cursor_size = 24,
   terminal = 'wezterm',
   launcher = 'fuzzel',
 })
 
-local terminal = beautiful.terminal
-local launcher = beautiful.launcher
-local modkey = 'mod'
+local terminal = apps.terminal
+local launcher = apps.launcher
+local mod = { 'mod' }
 
 -- ── Global keybinds ──────────────────────────────────────────────────
--- awful.key(mods, key, fn) + gears.table.join build the whole binding
--- list up front, AwesomeWM-rc.lua-style; root.keys(...) at the bottom
--- pushes the finished list to uwu.bind() one call each. A plain
--- uwu.bind({ 'mod' }, 'x', fn) call anywhere else in this file works
--- exactly the same as an entry here -- this is purely about reading
--- like one declarative table instead of many separate statements, not
--- a different mechanism underneath.
-local globalkeys = gears.table.join(
-  awful.key({ modkey }, 'Return', function()
-    awful.spawn(terminal)
-  end),
-  awful.key({ modkey }, 'd', function()
-    awful.spawn(launcher)
-  end),
-  awful.key({ modkey, 'shift' }, 'q', function()
-    awesome.quit()
-  end),
-  awful.key({ modkey, 'shift' }, 'r', function()
-    awesome.restart()
-  end),
-  awful.key({ modkey }, 'j', function()
-    awful.client.focus.byidx(1)
-  end),
-  awful.key({ modkey }, 'k', function()
-    awful.client.focus.byidx(-1)
-  end),
-  awful.key({ modkey, 'shift' }, 'c', function()
-    local c = client.focus
-    if c then
-      c:kill()
-    end
-  end),
-  awful.key({ modkey }, 'space', function()
-    awful.client.toggle_floating()
-  end),
-  awful.key({ modkey }, 'f', function()
-    awful.client.toggle_fullscreen()
-  end),
-  awful.key({ modkey }, 'i', function()
-    awful.layout.incMasterFactor(0.05)
-  end),
-  awful.key({ modkey }, 'u', function()
-    awful.layout.incMasterFactor(-0.05)
-  end),
-  awful.key({ modkey }, 'Tab', function()
-    uwu.focus_monitor(1)
-  end),
-  awful.key({ modkey }, 'e', function()
-    awful.spawn('emacsclient -c')
-  end),
-  awful.key({ modkey, 'shift' }, 's', function()
-    awful.spawn('grim -g "$(slurp)" ~/Pictures/screenshot-$(date +%s).png')
-  end),
-  awful.key({ modkey }, 'l', function()
-    awful.spawn('swaylock')
-  end)
-)
+-- paw.keys() takes the whole list at once and calls uwu.bind() for
+-- each entry -- { mods, key, fn, description } -- no separate "build a
+-- key object, join it into a list, then push the list" steps; a plain
+-- uwu.bind({ "mod" }, "x", fn) call anywhere else in this file works
+-- exactly the same as an entry here. The description (4th field) isn't
+-- read by uwuwm today; it's kept on paw.keymap for your own use (a
+-- which-key-style overlay, a `--dump-keys` debug bind, etc).
+local keys = {
+  {
+    mod,
+    'Return',
+    function()
+      paw.spawn(terminal)
+    end,
+    'open a terminal',
+  },
+  {
+    mod,
+    'd',
+    function()
+      paw.spawn(launcher)
+    end,
+    'app launcher',
+  },
+  { { 'mod', 'shift' }, 'q', paw.quit, 'quit uwuwm' },
+  { { 'mod', 'shift' }, 'r', paw.reload, 'reload config' },
+  { mod, 'j', paw.client.focus_next, 'focus next window' },
+  { mod, 'k', paw.client.focus_prev, 'focus previous window' },
+  { { 'mod', 'shift' }, 'c', paw.client.kill, 'close focused window' },
+  { mod, 'space', paw.client.toggle_floating, 'toggle floating' },
+  { mod, 'f', paw.client.toggle_fullscreen, 'toggle fullscreen' },
+  {
+    mod,
+    'i',
+    function()
+      paw.layout.inc_master(0.05)
+    end,
+    'grow master area',
+  },
+  {
+    mod,
+    'u',
+    function()
+      paw.layout.inc_master(-0.05)
+    end,
+    'shrink master area',
+  },
+  {
+    mod,
+    'Tab',
+    function()
+      paw.focus_monitor(1)
+    end,
+    'focus next monitor',
+  },
+  {
+    mod,
+    'e',
+    function()
+      paw.spawn('emacsclient -c')
+    end,
+    'emacsclient',
+  },
+  {
+    { 'mod', 'shift' },
+    's',
+    function()
+      paw.spawn(
+        'grim -g "$(slurp)" ~/Pictures/screenshot-' .. os.time() .. '.png'
+      )
+    end,
+    'screenshot a region',
+  },
+  {
+    mod,
+    'l',
+    function()
+      paw.spawn('swaylock')
+    end,
+    'lock the screen',
+  },
+
+  -- dwindle: bound whether or not this output is currently in dwindle
+  -- mode (paw.layout.set("dwindle")/("master") switches per-output --
+  -- see uwu.set_layout's own comment for why it's per-output, not
+  -- global). These are no-ops on a master-stack output.
+  {
+    { 'mod', 'shift' },
+    'space',
+    paw.layout.dwindle.toggle_split,
+    'toggle dwindle split orientation',
+  },
+  {
+    { 'mod', 'shift' },
+    'j',
+    paw.layout.dwindle.swap_split,
+    'swap dwindle split',
+  },
+  {
+    mod,
+    'r',
+    function()
+      paw.layout.dwindle.rotate_split(90)
+    end,
+    'rotate dwindle split 90°',
+  },
+}
 
 -- Tags 1..9: mod+N to view, mod+shift+N to move focused window, and
 -- mod+ctrl+N (only 1-5, keeps the modifier-heavy combo to the tags most
 -- people actually reach for) to toggle a tag into/out of the visible set.
-for i = 1, uwu.tag_count do
-  globalkeys = gears.table.join(
-    globalkeys,
-    awful.key({ modkey }, tostring(i), function()
-      awful.tag.viewonly(i)
-    end),
-    awful.key({ modkey, 'shift' }, tostring(i), function()
-      awful.tag.movetotag(i)
-    end)
-  )
+paw.tags(function(i)
+  table.insert(keys, {
+    mod,
+    tostring(i),
+    function()
+      paw.tag.view(i)
+    end,
+    'view tag ' .. i,
+  })
+  table.insert(keys, {
+    { 'mod', 'shift' },
+    tostring(i),
+    function()
+      paw.tag.move_client_here(i)
+    end,
+    'move window to tag ' .. i,
+  })
   if i <= 5 then
-    globalkeys = gears.table.join(
-      globalkeys,
-      awful.key({ modkey, 'ctrl' }, tostring(i), function()
-        awful.tag.viewtoggle(i)
-      end)
-    )
+    table.insert(keys, {
+      { 'mod', 'ctrl' },
+      tostring(i),
+      function()
+        paw.tag.toggle(i)
+      end,
+      'toggle tag ' .. i,
+    })
   end
-end
+end)
 
-root.keys(globalkeys)
+paw.keys(keys)
 
--- awful.tag.close_all(n) gracefully closes every window on tag n --
+-- paw.tag.close_all(n) gracefully closes every window on tag n --
 -- destructive, so it's deliberately not bound to a key here. Wire it up
 -- yourself if you want it, e.g. a dedicated "close everything on tag 9"
 -- bind:
--- root.keys(gears.table.join(globalkeys,
---     awful.key({ modkey, 'shift', 'ctrl' }, '9', function() awful.tag.close_all(9) end)))
+-- paw.keys({ { { "mod", "shift", "ctrl" }, "9", function() paw.tag.close_all(9) end } })
 
 -- ── Monitor configuration ───────────────────────────────────────────────
--- Still uwu.monitor.* directly -- there's no awful.screen.set(), since
--- output configuration (position/mode/scale/transform/adaptive-sync)
--- isn't something AwesomeWM's own awful.screen concerns itself with
--- either (that's usually xrandr's job on X11); awful.screen here only
--- covers reading back what's connected (awful.screen.get()/focused()).
--- Every field is optional; only what's set is applied/stored. Run
--- `awful.screen.get()` (e.g. from a keybind that dumps it to
+-- Still paw.monitor.* (a direct re-export of uwu.monitor.*) -- output
+-- configuration (position/mode/scale/transform/adaptive-sync) is lower
+-- level than anything a theme/keybind wrapper should paper over. Run
+-- `paw.monitor.list()` (e.g. from a keybind that dumps it to
 -- notify-send or a log) to see connected output names before filling
 -- these in.
 --
--- uwu.monitor.set("DP-1", {
+-- paw.monitor.set("DP-1", {
 --     x = 0, y = 0,
 --     width = 2560, height = 1440, refresh = 144,
 --     scale = 1.0,
 --     transform = "normal", -- normal|90|180|270|flipped|flipped-90|...
 --     adaptive_sync = true,
 -- })
--- uwu.monitor.set("eDP-1", { x = 2560, y = 0, enabled = true })
--- uwu.monitor.set("*", { scale = 1.0 }) -- fallback default for anything else
+-- paw.monitor.set("eDP-1", { x = 2560, y = 0, enabled = true })
+-- paw.monitor.set("*", { scale = 1.0 }) -- fallback default for anything else
 
 -- ── Input device configuration ──────────────────────────────────────────
--- Also still uwu.input.* directly, same reasoning as monitors above --
--- `match` is an exact libinput device name (see uwu.input.list()), a
+-- `match` is an exact libinput device name (see paw.input.list()), a
 -- type selector ("type:touchpad" / "type:mouse"), or "*" for a fallback
 -- default applied to any pointer device without a more specific rule --
 -- exact name always wins over type, and type always wins over "*".
-uwu.input.set('type:touchpad', {
+paw.input.set('type:touchpad', {
   tap = true, -- tap-to-click
   tap_drag = true, -- tap-and-hold then move = drag
   tap_drag_lock = true, -- lift finger mid-drag without dropping it
@@ -173,39 +238,38 @@ uwu.input.set('type:touchpad', {
 })
 
 -- ── Client rules ─────────────────────────────────────────────────────
--- awful.rules.rules is the AwesomeWM-shaped { rule = ..., properties =
--- ... } declarative table; awful.rules.apply() pushes the whole thing
--- to uwu.rule() in one go. `rule.class` is accepted as a synonym for
--- uwuwm's own `app_id` field (see lib/awful/rules.lua) so a rule copied
--- straight out of an AwesomeWM config matches identically.
-awful.rules.rules = {
-  { rule = { class = 'mpv' }, properties = { floating = true, tag = 3 } },
-  { rule = { class = 'foot' }, properties = { tag = 1 } },
-  { rule = { class = 'pavucontrol' }, properties = { floating = true } },
-  { rule = { class = '~steam_app_.*' }, properties = { tag = 9 } }, -- "~" prefix = Lua pattern
-  -- Anything already auto-detected as floating (a parent window, a
-  -- fixed-size dialog, or an X11 client with
-  -- _NET_WM_WINDOW_TYPE_DIALOG/UTILITY/SPLASH) that isn't caught by a
-  -- more specific rule above still gets parked on the scratch tag
-  -- (9) -- one rule instead of naming every file-picker/color-chooser
-  -- app_id by hand.
-  { rule = { floating = true }, properties = { tag = 9 } },
-}
-awful.rules.apply()
+-- paw.rule({ when = {...}, set = {...} }) -- `when` matches on the
+-- client (app_id, title, or the floating state uwuwm already
+-- auto-detected before this rule runs), `set` is what gets applied.
+-- paw.like(pattern) marks a field as a Lua pattern (uwuwm's own "~"
+-- prefix convention) instead of an exact string match.
+paw.rule({ when = { app_id = 'mpv' }, set = { floating = true, tag = 3 } })
+paw.rule({ when = { app_id = 'foot' }, set = { tag = 1 } })
+paw.rule({ when = { app_id = 'pavucontrol' }, set = { floating = true } })
+paw.rule({ when = { app_id = paw.like('steam_app_.*') }, set = { tag = 9 } })
+-- Anything already auto-detected as floating (a parent window, a
+-- fixed-size dialog, or an X11 client with
+-- _NET_WM_WINDOW_TYPE_DIALOG/UTILITY/SPLASH) that isn't caught by a
+-- more specific rule above still gets parked on the scratch tag
+-- (9) -- one rule instead of naming every file-picker/color-chooser
+-- app_id by hand.
+paw.rule({ when = { floating = true }, set = { tag = 9 } })
 
--- ── Signals / hooks ──────────────────────────────────────────────────
--- client.connect_signal("manage"/"unmanage"/"focus"/"unfocus"/
--- "fullscreen", fn) is AwesomeWM's own name for exactly the uwu.hook
--- events documented in MISSING.md -- fn(c) gets the same Client
--- userdata either way, so the field/method docs there still apply
--- verbatim: c.title, c.app_id, c.is_xwayland, c.tags, c.floating,
+-- ── Hooks ──────────────────────────────────────────────────────────────
+-- paw.on(event, fn) is uwu.hook() with short verb names in place of the
+-- raw "client::"-prefixed event strings -- "opens"/"closes"/"focuses"/
+-- "unfocuses"/"fullscreens" (fn gets the same Client userdata either
+-- way: c.title, c.app_id, c.is_xwayland, c.tags, c.floating,
 -- c.fullscreen, c.output, c.geo, c:focus(), c:kill(), c:set_tag(n),
--- c:toggle_tag(n), c:move_to_output(name).
+-- c:toggle_tag(n), c:move_to_output(name)), plus "tags_changed"
+-- (monitor_name, new_tagset), "monitor_connected"/"monitor_disconnected"
+-- (monitor_name). Any raw "namespace::event" string works too, unchanged
+-- -- paw.on() only rewrites the names it recognizes.
 --
--- client.disconnect_signal(id) removes a registration later -- handy
--- for ad-hoc hooks (a "focus this app" toggle keybind, say) without
--- leaving a permanent listener behind.
-local focus_steam_id = client.connect_signal('focus', function(c)
+-- paw.off(id) removes a registration later -- handy for ad-hoc hooks (a
+-- "focus this app" toggle keybind, say) without leaving a permanent
+-- listener behind.
+local focus_steam_id = paw.on('focuses', function(c)
   if c.app_id == 'steam' then
     -- ensure steam (and only steam) lands on tag 9 when it gets focus
     if c.tags ~= 256 then
@@ -214,20 +278,16 @@ local focus_steam_id = client.connect_signal('focus', function(c)
   end
 end)
 
--- tag.connect_signal("change", fn)        fn(monitor_name, new_tagset)
--- screen.connect_signal("connect", fn)    fn(monitor_name)
--- screen.connect_signal("disconnect", fn) fn(monitor_name)
---
--- client.disconnect_signal(focus_steam_id) -- to remove the hook above later.
+-- paw.off(focus_steam_id) -- to remove the hook above later.
 
 -- ── Querying current state ─────────────────────────────────────────────
--- client.get() and client.focus round out the read side -- the same
--- Client userdata every signal callback gets, so any method on one of
--- these works too:
+-- paw.client.list() and paw.client.focused() round out the read side --
+-- the same Client userdata every hook callback gets, so any method on
+-- one of these works too:
 --
---   for _, c in ipairs(client.get()) do
---     if c.app_id == 'slack' and c.output ~= 'eDP-1' then
---       c:move_to_output('eDP-1')
+--   for _, c in ipairs(paw.client.list()) do
+--     if c.app_id == "slack" and c.output ~= "eDP-1" then
+--       c:move_to_output("eDP-1")
 --     end
 --   end
 --

@@ -1524,9 +1524,9 @@ std::string userConfigPath() {
 }
 
 // Same resolution order as userConfigPath(), minus the "/rc.lua" suffix
-// -- this is where `require("awful")`/`require("beautiful")` look for a
+// -- this is where `require("paw")`/`require("nyaa")` look for a
 // user override of the shipped lib/ tree (e.g. ~/.config/uwuwm/lib/
-// awful/init.lua replacing the built-in one) before falling back to the
+// paw/init.lua replacing the built-in one) before falling back to the
 // dev/installed copies extendPackagePath() also adds below.
 std::string userConfigDir() {
     if(const char* xdg = getenv("XDG_CONFIG_HOME"); xdg && *xdg) {
@@ -1538,12 +1538,12 @@ std::string userConfigDir() {
     return {};
 }
 
-// Prepends every place rc.lua's require("awful")/require("beautiful")
-// (and anything either of those transitively requires -- gears.table,
-// etc.) should be found, highest-priority first:
+// Prepends every place rc.lua's require("paw")/require("nyaa")
+// (and anything either of those transitively requires) should be
+// found, highest-priority first:
 //
 //   1. <user config dir>/lib/          -- lets a user drop in their own
-//      awful/beautiful (or add a sibling module) that shadows the
+//      paw/nyaa (or add a sibling module) that shadows the
 //      shipped one, same override precedence rc.lua itself already has
 //      over the embedded kDefaultConfig.
 //   2. <source tree>/lib/              -- only exists/matters when

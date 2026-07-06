@@ -1,0 +1,27 @@
+# uwuwm install manifest -- read by `make install`.
+#
+# One (src dst mode) triple per line, in the order they should be
+# installed. `make install` reads this list inside a privileged
+# sudo bash -c and runs `install -D -m mode src dst` for each line.
+#
+# `src` is relative to the repo root, `dst` is the absolute FHS
+# target path. Mode is a 4-digit octal. The list mirrors what the
+# old meson.build's install_data / install_subdir calls produced:
+# binary first, then the .desktop session entry, then the share
+# tree (reference copies of the LuaLS stub + project config at
+# the datadir root, then the nested lib/ tree that LuaLS
+# actually resolves the stub against).
+#
+# Edit this file (not meson.build) to change the install layout.
+# Adding a file? Add a line. Renaming? Edit the src and dst.
+# Removing? Delete the line.
+
+builddir/uwuwm                                /usr/bin/uwuwm                                  0755
+wayland-sessions/uwuwm.desktop                /usr/share/wayland-sessions/uwuwm.desktop      0644
+rc.lua                                        /usr/share/uwuwm/rc.lua                        0644
+lib/meta/uwu.lua                              /usr/share/uwuwm/uwu.lua                       0644
+lib/.luarc.json                               /usr/share/uwuwm/.luarc.json                   0644
+lib/.luarc.json                               /usr/share/uwuwm/lib/.luarc.json               0644
+lib/meta/uwu.lua                              /usr/share/uwuwm/lib/meta/uwu.lua              0644
+lib/nyaa/init.lua                             /usr/share/uwuwm/lib/nyaa/init.lua             0644
+lib/paw/init.lua                              /usr/share/uwuwm/lib/paw/init.lua              0644

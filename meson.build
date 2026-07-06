@@ -6,17 +6,6 @@ project(
         'warning_level=3',
         'cpp_std=c++23',
         'buildtype=debugoptimized',
-        # Meson's own default (/usr/local) puts the binary at
-        # /usr/local/bin/uwuwm and the session file at
-        # /usr/local/share/wayland-sessions/uwuwm.desktop -- display
-        # managers (GDM, SDDM, ...) only scan /usr/share/wayland-sessions,
-        # so a /usr/local install is invisible to the login screen even
-        # though the binary itself runs fine by hand. Defaulting to /usr
-        # here means a plain `meson setup build && ninja -C build && sudo
-        # meson install -C build` lands everything where it's actually
-        # read from, with no `-Dprefix=/usr` needed. Override with
-        # `-Dprefix=/usr/local` (or anywhere else) at setup time if you
-        # want the old behavior back for a non-packaged/personal install.
         'prefix=/usr',
     ],
 )
@@ -25,13 +14,13 @@ cpp = meson.get_compiler('cpp')
 
 add_project_arguments('-DWLR_USE_UNSTABLE', language: ['c', 'cpp'])
 
-# Lets lua_config.cpp's extendPackagePath() find lib/awful, lib/beautiful,
-# etc. both when running straight out of the build directory (dev/test,
-# e.g. Jlessica's own `./builddir/uwuwm` workflow -- UWUWM_SRCDIR) and
-# after a real `meson install` (UWUWM_DATADIR, matching the
-# install_subdir('lib', ...) call further down). Quoted so the resulting
-# C++ string literal is exactly the path, not the path parsed as more
-# preprocessor tokens.
+# Lets lua_config.cpp's extendPackagePath() find the paw/nyaa Lua
+# libraries both when running straight out of the build directory
+# (dev/test, e.g. Jlessters's own `./builddir/uwuwm` workflow --
+# UWUWM_SRCDIR) and from a system install (UWUWM_DATADIR, matching
+# the share tree the Makefile lands at /usr/share/uwuwm/). Quoted
+# so the resulting C++ string literal is exactly the path, not the
+# path parsed as more preprocessor tokens.
 add_project_arguments(
     '-DUWUWM_SRCDIR="' + meson.current_source_dir() + '"',
     '-DUWUWM_DATADIR="' + get_option('prefix') / get_option('datadir') / 'uwuwm' + '"',
@@ -156,7 +145,9 @@ src = files(
 inc = include_directories('src')
 
 # ── Executable ───────────────────────────────────────────────────────────
-exe = executable(
+# The Makefile installs the built binary -- not `meson install`. See
+# the install section below for the full rationale.
+executable(
     'uwuwm',
     src,
     protocols_src,
@@ -165,60 +156,17 @@ exe = executable(
     cpp_args: patched_inc_args,
     c_args: patched_inc_args,
     link_args: ['-Wl,--as-needed'],
-    install: true,
+    install: false,
 )
 
 # ── Install layout (Standard FHS) ───────────────────────────────────────
-# Prefix defaults to /usr (see project()'s default_options above), so
-# `meson install` writes to real, DM/PATH-visible locations with no
-# extra flags:
+# Install is handled by the top-level Makefile, not by `meson install`.
+# See `install.list` at the repo root for the (src dst mode) triples
+# and `make install` for the install + chown logic.
 #
-#   meson setup build
-#   ninja -C build
-#   sudo meson install -C build   # copies to /usr/bin, /usr/share/...
-#
-# Files installed:
-#   /usr/bin/uwuwm                       the binary (executable.install: true)
-#   /usr/share/wayland-sessions/uwuwm.desktop  DM-visible session entry
-#   /usr/share/uwuwm/rc.lua              example config the user can copy
-#                                         to ~/.config/uwuwm/rc.lua; never
-#                                         auto-loaded (the runtime looks at
-#                                         ~/.config/uwuwm/rc.lua first and
-#                                         the embedded kDefaultConfig only
-#                                         if that doesn't exist).
-#   /usr/share/uwuwm/lib/...             the awful/beautiful/gears Lua
-#                                         library tree (see
-#                                         extendPackagePath() in
-#                                         lua_config.cpp)
-#
-# NOT installed: the autostart script, which is per-user and not part
-# of the shipped tree (the user creates ~/.config/uwuwm/autostart.sh).
-
-install_data(
-    'wayland-sessions/uwuwm.desktop',
-    install_dir: get_option('datadir') / 'wayland-sessions',
-)
-
-# Copy the example rc.lua to /usr/share/uwuwm/ as a *reference*, not as
-# something the runtime reads -- uwuwm never looks in /usr/share/uwuwm/
-# at startup. The point is just so a fresh user has a copy they can
-# `cp /usr/share/uwuwm/rc.lua ~/.config/uwuwm/` to start editing from,
-# without having to clone the repo. `install_mode` preserves the source
-# file's mode bits (444) so the user can't accidentally edit the
-# /usr copy and wonder why their changes vanish on the next update.
-install_data(
-    'rc.lua',
-    install_dir: get_option('datadir') / 'uwuwm',
-    install_mode: 'rw-r--r--',
-)
-
-# The awful/beautiful/gears Lua library tree -- installed so
-# require("awful")/require("beautiful") resolve for every user's rc.lua,
-# not just a from-source checkout. See extendPackagePath() in
-# lua_config.cpp for the exact search order (a user's own
-# ~/.config/uwuwm/lib/ always shadows this copy).
-install_subdir(
-    'lib',
-    install_dir: get_option('datadir') / 'uwuwm',
-    strip_directory: false,
-)
+# The -DUWUWM_DATADIR=... definition at the top of this file still
+# embeds the absolute datadir path in the compiled binary -- that's
+# build-time data the runtime reads in extendPackagePath() (see
+# src/lua_config.cpp), not an install rule. Removing it would break
+# require("paw")/require("nyaa") for any user running the installed
+# binary, so it stays regardless of who runs the install.
