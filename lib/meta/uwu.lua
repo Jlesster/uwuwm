@@ -57,8 +57,10 @@ function uwu.bind(mods, key, fn) end
 ---lua_config.cpp): "gap", "border_width", "master_factor", "repeat_rate",
 ---"repeat_delay", "cursor_size", "terminal", "launcher",
 ---"border_color_active", "border_color_inactive", "background_color",
----"dwindle_preserve_split", "focus_follows_mouse". An unknown name is
----logged and ignored, not an error.
+---"dwindle_preserve_split", "focus_follows_mouse", "inactive_opacity"
+---(0.05-1.0, clamped; static per-view dim applied the moment focus leaves
+---it -- see View::setFocused). An unknown name is logged and ignored, not
+---an error.
 ---@param name string
 ---@param value string|number|boolean
 function uwu.set(name, value) end

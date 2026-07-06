@@ -279,6 +279,15 @@ protected:
     // own, but its color is already RGBA).
     void setOpacity(float alpha);
 
+    // Explicit-focused overload -- used by setFocused() itself, where
+    // server.focused_view can't be trusted yet (Server::focusView updates
+    // it *after* calling the outgoing view's setFocused(false), so
+    // `server.focused_view == this` would still read true for the view
+    // losing focus at that exact call site). Every other caller
+    // (tickAnimation, startAnim) keeps using the single-arg overload,
+    // where focus is already settled and server.focused_view is correct.
+    void setOpacity(float alpha, bool focused);
+
 private:
     void startAnim(const wlr_box& from,
                    const wlr_box& to,

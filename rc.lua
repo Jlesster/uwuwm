@@ -17,8 +17,12 @@
 --         short-named hooks) -- not a blanket re-export of uwu.* anymore;
 --         call uwu.monitor/uwu.input/uwu.system/uwu.set_layout/etc
 --         directly, same as this file does below
---   nyaa  aesthetics only -- theme presets, applied via uwu.set() /
---         per-client via uwu.rule()
+--   nyaa  aesthetics only -- two-color presets (nyaa.presets) or full
+--         26-role palettes (nyaa.palettes/nyaa.palette(), Catppuccin's
+--         four flavors plus a few others), applied via uwu.set() /
+--         per-client via uwu.rule(), plus nyaa.export.* to render the
+--         same palette into config snippets for the rest of your DE
+--         (GTK, kitty, foot, waybar, dunst)
 --
 -- (lib/paw, lib/nyaa -- see extendPackagePath() in lua_config.cpp for
 -- where those get found). A wibox-equivalent (status bar / widgets) is
@@ -30,19 +34,43 @@ local paw = require('paw')
 local nyaa = require('nyaa')
 
 -- ── Theme ────────────────────────────────────────────────────────────
--- nyaa.wear() only ever touches the five *visual* uwu.set() fields
--- (gap, border_width, border_color_active/inactive, cursor_size) --
--- it'll refuse master_factor/repeat_rate/repeat_delay/terminal/launcher
--- below with a pointer back to paw.defaults(), which owns those instead.
--- `preset` (see nyaa.presets for the full list) seeds border colors;
--- everything else is an override. Every field is optional; anything you
--- don't set keeps RuntimeConfig's compiled-in default.
+-- nyaa.wear() only ever touches the seven *visual* uwu.set() fields
+-- (gap, border_width, border_color_active/inactive, background_color,
+-- cursor_size, inactive_opacity) -- it'll refuse master_factor/
+-- repeat_rate/repeat_delay/terminal/launcher/dwindle_preserve_split below
+-- with a pointer back to paw.defaults(), which owns those instead.
+--
+-- `preset` (see nyaa.presets) seeds just the two border colors, same as
+-- before. `flavor` (see lib/nyaa/palettes.lua) seeds border colors *and*
+-- background_color from the same full 26-role palette nyaa.export.*
+-- below reads from -- use this instead of `preset` if you also want
+-- nyaa.export.* to track the same colors uwuwm itself is drawing with.
+-- Everything else is an override; every field is optional, and anything
+-- you don't set keeps RuntimeConfig's compiled-in default.
 nyaa.wear({
-  preset = 'catppuccin_mocha',
+  flavor = 'catppuccin_mocha',
   gap = 8,
   border_width = 2,
   cursor_size = 24,
+  inactive_opacity = 0.85, -- dim unfocused windows slightly; 1.0 disables
 })
+
+-- nyaa.export.* renders the same palette nyaa.wear() just applied into
+-- config snippets for the rest of your desktop (GTK, kitty, foot,
+-- waybar, dunst -- see lib/nyaa/export.lua for the full target list and
+-- what each one assumes about where you'll point it). write_all() writes
+-- every target's file into one directory in a single call; point your
+-- other apps' configs at files under here (an @import in gtk.css, an
+-- `include` in kitty.conf, ...) and they pick up whatever nyaa.wear()
+-- above chose on every uwu.reload().
+--
+-- local ok, errs = nyaa.export.write_all(
+--   os.getenv('HOME') .. '/.cache/uwuwm-theme',
+--   'catppuccin_mocha'
+-- )
+-- for target, err in pairs(errs) do
+--   print('nyaa.export failed for ' .. target .. ': ' .. err)
+-- end
 
 -- paw.defaults() owns the five *behavior*/app fields instead --
 -- master_factor (initial tiling ratio), repeat_rate/repeat_delay

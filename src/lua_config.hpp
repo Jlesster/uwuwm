@@ -35,6 +35,16 @@ struct RuntimeConfig {
     uint32_t border_color_inactive = 0x313244ff;  // catppuccin surface0
     float    background_color[4]   = {0.067f, 0.071f, 0.090f, 1.0f};  // base
 
+    // Static (not tweened) opacity applied to every unfocused view's
+    // buffers + border alpha the moment focus leaves it -- View::setFocused
+    // drives this through the same View::setOpacity/updateBorderColor path
+    // ViewAnimation already uses for open/close tweens, so it composes with
+    // those instead of fighting them. 1.0 (default) means "no dimming,"
+    // matching every other opt-in visual knob's default. Clamped to
+    // [0.05, 1.0] in the setter -- 0 would make an unfocused window
+    // impossible to click back into visually.
+    float inactive_opacity = 1.0f;
+
     int    repeat_rate_hz  = 25;
     int    repeat_delay_ms = 600;
     double cursor_size     = 24;

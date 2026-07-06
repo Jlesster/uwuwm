@@ -268,6 +268,11 @@ const std::unordered_map<std::string, SetterFunc> kSettingSetters = {
      [](lua_State* L, RuntimeConfig& s) {
          s.focus_follows_mouse = lua_toboolean(L, 2);
      }},
+    {"inactive_opacity",
+     [](lua_State* L, RuntimeConfig& s) {
+         s.inactive_opacity = std::clamp(
+             static_cast<float>(luaL_checknumber(L, 2)), 0.05f, 1.0f);
+     }},
 };
 
 // uwu.get()'s inverse map -- added alongside uwu.set() so a rule/hook can
@@ -329,6 +334,10 @@ const std::unordered_map<std::string, GetterFunc> kSettingGetters = {
     {"focus_follows_mouse",
      [](lua_State* L, const RuntimeConfig& s) {
          lua_pushboolean(L, s.focus_follows_mouse);
+     }},
+    {"inactive_opacity",
+     [](lua_State* L, const RuntimeConfig& s) {
+         lua_pushnumber(L, s.inactive_opacity);
      }},
 };
 

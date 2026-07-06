@@ -8,17 +8,21 @@
 local paw = {}
 
 -- ── behavior / app defaults ──────────────────────────────────────────────
--- uwu.set(name, value) covers ten settings total (see kSettingSetters in
--- lua_config.cpp): five are visual (nyaa.wear()'s job -- gap,
--- border_width, border_color_active, border_color_inactive,
--- cursor_size) and five are behavior/app preferences, which paw.defaults()
--- owns instead: master_factor (initial tiling ratio -- paw.layout.inc_master
--- only ever nudges it by a delta, this sets the absolute starting value),
--- repeat_rate/repeat_delay (keyboard timing), and terminal/launcher (the
--- two app strings your own keybinds will want to reference). Same
--- partition as nyaa.wear(), mirrored: paw.defaults() rejects nyaa's five
--- fields by name instead of quietly forwarding them, so the boundary
--- between the two can't drift back open by accident.
+-- uwu.set(name, value) covers thirteen settings total (see
+-- kSettingSetters in lua_config.cpp): seven are visual (nyaa.wear()'s job
+-- -- gap, border_width, border_color_active, border_color_inactive,
+-- background_color, cursor_size, inactive_opacity) and six are
+-- behavior/app preferences, which paw.defaults() owns instead:
+-- master_factor (initial tiling ratio -- paw.layout.inc_master only ever
+-- nudges it by a delta, this sets the absolute starting value),
+-- repeat_rate/repeat_delay (keyboard timing), terminal/launcher (the two
+-- app strings your own keybinds will want to reference), and
+-- dwindle_preserve_split (see dwindle.hpp -- whether a split's
+-- orientation survives a resize instead of being recomputed from the
+-- box's aspect ratio every arrange). Same partition as nyaa.wear(),
+-- mirrored: paw.defaults() rejects nyaa's seven fields by name instead of
+-- quietly forwarding them, so the boundary between the two can't drift
+-- back open by accident.
 local BEHAVIOR_FIELDS = {
   master_factor = true,
   repeat_rate = true,
@@ -26,6 +30,7 @@ local BEHAVIOR_FIELDS = {
   terminal = true,
   launcher = true,
   focus_follows_mouse = true,
+  dwindle_preserve_split = true,
 }
 
 local NYAA_OWNED_FIELDS = {
@@ -34,6 +39,8 @@ local NYAA_OWNED_FIELDS = {
   cursor_size = true,
   border_color_active = true,
   border_color_inactive = true,
+  background_color = true,
+  inactive_opacity = true,
 }
 
 -- paw.defaults({ terminal = "wezterm", launcher = "fuzzel", master_factor = 0.55 })

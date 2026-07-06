@@ -183,7 +183,18 @@ void View::updateBorderColor(bool focused, float alpha) {
 }
 
 void View::setFocused(bool focused) {
-    updateBorderColor(focused);
+    // inactive_opacity (default 1.0 == disabled) rides the same
+    // setOpacity()/updateBorderColor() path ViewAnimation's tweens use, so
+    // it composes with open/close animations instead of racing them.
+    //
+    // Explicit-focused overload, not the single-arg one: Server::focusView
+    // calls prev->setFocused(false) *before* it reassigns focused_view (see
+    // that function's comment), so server.focused_view == this would still
+    // read true for the view that's losing focus right here -- silently
+    // painting the active border color (just dimmed) instead of the
+    // inactive one. Passing `focused` straight through is the fix.
+    setOpacity(focused ? 1.0f : server.lua_cfg.settings.inactive_opacity,
+               focused);
     activateBackend(focused);
     if(foreign_toplevel) {
         wlr_foreign_toplevel_handle_v1_set_activated(foreign_toplevel, focused);
@@ -348,13 +359,17 @@ void View::beginInteractiveResize(uint32_t edges) {
 }
 
 void View::setOpacity(float alpha) {
+    setOpacity(alpha, server.focused_view == this);
+}
+
+void View::setOpacity(float alpha, bool focused) {
     wlr_scene_node_for_each_buffer(
         &content_tree->node,
         [](wlr_scene_buffer* buffer, int /*sx*/, int /*sy*/, void* data) {
             wlr_scene_buffer_set_opacity(buffer, *static_cast<float*>(data));
         },
         &alpha);
-    updateBorderColor(server.focused_view == this, alpha);
+    updateBorderColor(focused, alpha);
 }
 
 void View::startAnim(const wlr_box& from,
