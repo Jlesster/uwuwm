@@ -361,6 +361,51 @@ uint32_t parseTransform(const char* s) {
     return WL_OUTPUT_TRANSFORM_NORMAL;
 }
 
+// String <-> WallpaperMode, same shape as parseTransform above. Returns
+// false (leaving `out` untouched) for an unrecognized name instead of
+// silently defaulting -- unlike a transform, there's no single "safe"
+// wallpaper mode to fall back to that wouldn't surprise whoever typo'd
+// the string, so l_wallpaper_set treats this as a hard error.
+bool parseWallpaperMode(const char* s, WallpaperMode& out) {
+    if(!s) { return false; }
+    std::string m(s);
+    if(m == "fill") {
+        out = WallpaperMode::Fill;
+        return true;
+    }
+    if(m == "fit") {
+        out = WallpaperMode::Fit;
+        return true;
+    }
+    if(m == "stretch") {
+        out = WallpaperMode::Stretch;
+        return true;
+    }
+    if(m == "center") {
+        out = WallpaperMode::Center;
+        return true;
+    }
+    if(m == "tile") {
+        out = WallpaperMode::Tile;
+        return true;
+    }
+    return false;
+}
+
+// Expands a leading "~" (or "~/...") to $HOME, same convention rc.lua
+// itself already uses via os.getenv('HOME') string concatenation --
+// uwu.wallpaper.set() accepts a bare "~/Pictures/wall.png" directly
+// rather than requiring every rc.lua to spell out the concatenation
+// itself. Leaves the path untouched (including any other "~" not at
+// position 0) if $HOME isn't set, same "degrade, don't crash" spirit as
+// everywhere else path-like input is handled in this file.
+std::string expandHome(const std::string& path) {
+    if(path.empty() || path[0] != '~') { return path; }
+    const char* home = getenv("HOME");
+    if(!home || !*home) { return path; }
+    return std::string(home) + path.substr(1);
+}
+
 // ----------------------------------------------------------------------------
 // Timeout/recursion guard for arbitrary Lua callbacks (keybinds, hooks,
 // rules). Every uwu.bind/uwu.hook callback ultimately runs through
@@ -1433,6 +1478,147 @@ const luaL_Reg kMonitorFuncs[] = {
 };
 
 // ----------------------------------------------------------------------------
+// uwu.wallpaper.* functions
+// ----------------------------------------------------------------------------
+
+// uwu.wallpaper.set(name, { path = "...", mode = "fill" }). `name` is a
+// wlr_output name ("DP-1", "eDP-1", ...) or the wildcard "*" -- same
+// exact-name-wins-over-wildcard precedence as uwu.monitor.set, see
+// findWallpaperRule in wallpaper.cpp. `path` is required; `mode`
+// defaults to "fill" if omitted (one of fill/fit/stretch/center/tile --
+// see WallpaperMode's doc comment in wallpaper.hpp for what each one
+// does). A leading "~" in `path` is expanded to $HOME.
+//
+// Unlike l_monitor_set (which only re-applies live to an exact-name
+// match; a "*" rule needs a reload to reach already-connected outputs),
+// this re-sweeps *every* currently-connected output through
+// findWallpaperRule immediately after storing the rule -- "*" is the
+// common case for a wallpaper (one image for every monitor), not the
+// exception, so it isn't treated as a second-class case here the way it
+// is for uwu.monitor.set.
+//
+// Decode errors (missing file, corrupt/unsupported image) are logged by
+// loadWallpaperImage (wallpaper.cpp) and leave background_color as the
+// only thing visible on the affected output(s) -- never a hard Lua
+// error, so a bad path in rc.lua can't take the rest of a reload down
+// with it.
+int l_wallpaper_set(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    lua_getfield(L, 2, "path");
+    const char* raw_path = luaL_checkstring(L, -1);
+    lua_pop(L, 1);
+
+    WallpaperRule rule;
+    rule.name = name;
+    rule.path = expandHome(raw_path);
+
+    lua_getfield(L, 2, "mode");
+    if(!lua_isnil(L, -1)) {
+        const char* mode_str = luaL_checkstring(L, -1);
+        if(!parseWallpaperMode(mode_str, rule.mode)) {
+            lua_pop(L, 1);
+            return luaL_error(L,
+                              "uwu.wallpaper.set: unknown mode '%s' (known: "
+                              "fill, fit, stretch, center, tile)",
+                              mode_str);
+        }
+    }
+    lua_pop(L, 1);
+
+    // Re-decoding on every uwu.wallpaper.set() call for the same path
+    // (rather than trusting the cache) means editing a wallpaper file in
+    // place and re-running the same rc.lua line always picks up the
+    // change -- see loadWallpaperImage/forgetWallpaperImage's own doc
+    // comments in wallpaper.hpp for why the cache exists at all (sharing
+    // one decode across every output/tile that uses the same path).
+    forgetWallpaperImage(rule.path);
+
+    LuaConfig* cfg = getConfig(L);
+    auto       it  = std::find_if(
+        cfg->wallpaper_rules.begin(),
+        cfg->wallpaper_rules.end(),
+        [&](const WallpaperRule& r) { return r.name == rule.name; });
+    if(it != cfg->wallpaper_rules.end()) {
+        *it = rule;
+    } else {
+        cfg->wallpaper_rules.push_back(rule);
+    }
+
+    Server* server = getServer(L);
+    for(auto& out : server->outputs) { applyWallpaper(*out); }
+    return 0;
+}
+
+// uwu.wallpaper.clear(name) -- removes name's wallpaper rule ("*" clears
+// the fallback default, not every output's wallpaper at once; clear each
+// exact name individually too if that's what you want). Re-sweeps every
+// connected output the same way l_wallpaper_set does, so an output that
+// was only getting a wallpaper via "*" immediately falls back to
+// background_color if you clear the wildcard, and vice versa. A no-op,
+// not an error, if `name` had no rule to begin with.
+int l_wallpaper_clear(lua_State* L) {
+    const char* name = luaL_checkstring(L, 1);
+
+    LuaConfig* cfg = getConfig(L);
+    std::erase_if(cfg->wallpaper_rules,
+                  [&](const WallpaperRule& r) { return r.name == name; });
+
+    Server* server = getServer(L);
+    for(auto& out : server->outputs) { applyWallpaper(*out); }
+    return 0;
+}
+
+// uwu.wallpaper.list() -> array of {name, path, mode} for every rule
+// currently set via uwu.wallpaper.set() -- one entry per *rule* (i.e.
+// per name/"*" selector), not one per connected output the way
+// uwu.monitor.list() is. Cross-reference against uwu.monitor.list()'s
+// own `name` field plus findWallpaperRule's exact-then-wildcard
+// precedence if you need "what wallpaper is output X actually showing".
+int l_wallpaper_list(lua_State* L) {
+    LuaConfig* cfg = getConfig(L);
+    lua_newtable(L);
+    int i = 1;
+    for(const WallpaperRule& rule : cfg->wallpaper_rules) {
+        lua_newtable(L);
+        lua_pushstring(L, rule.name.c_str());
+        lua_setfield(L, -2, "name");
+        lua_pushstring(L, rule.path.c_str());
+        lua_setfield(L, -2, "path");
+        const char* mode_str = "fill";
+        switch(rule.mode) {
+            case WallpaperMode::Fill:
+                mode_str = "fill";
+                break;
+            case WallpaperMode::Fit:
+                mode_str = "fit";
+                break;
+            case WallpaperMode::Stretch:
+                mode_str = "stretch";
+                break;
+            case WallpaperMode::Center:
+                mode_str = "center";
+                break;
+            case WallpaperMode::Tile:
+                mode_str = "tile";
+                break;
+        }
+        lua_pushstring(L, mode_str);
+        lua_setfield(L, -2, "mode");
+        lua_rawseti(L, -2, i++);
+    }
+    return 1;
+}
+
+const luaL_Reg kWallpaperFuncs[] = {
+    {"set",   l_wallpaper_set  },
+    {"clear", l_wallpaper_clear},
+    {"list",  l_wallpaper_list },
+    {nullptr, nullptr          },
+};
+
+// ----------------------------------------------------------------------------
 // uwu.input.* functions
 // ----------------------------------------------------------------------------
 
@@ -1919,6 +2105,10 @@ void LuaConfig::init(Server& server) {
     lua_setfield(L, -2, "monitor");
 
     lua_newtable(L);
+    luaL_setfuncs(L, kWallpaperFuncs, 0);
+    lua_setfield(L, -2, "wallpaper");
+
+    lua_newtable(L);
     luaL_setfuncs(L, kTagFuncs, 0);
     lua_setfield(L, -2, "tag");
 
@@ -2116,14 +2306,16 @@ bool LuaConfig::reload() {
     lua_State*                          old_L        = L;
     std::multimap<uint32_t, LuaKeybind> old_keybinds = std::move(keybinds);
     std::vector<MonitorRule>            old_rules    = std::move(monitor_rules);
-    std::vector<InputRule> old_input_rules           = std::move(input_rules);
-    std::vector<LuaHook>   old_hooks                 = std::move(hooks);
-    RuntimeConfig          old_settings              = settings;
-    int                    old_next_hook_id          = next_hook_id;
+    std::vector<InputRule>     old_input_rules       = std::move(input_rules);
+    std::vector<WallpaperRule> old_wallpaper_rules = std::move(wallpaper_rules);
+    std::vector<LuaHook>       old_hooks           = std::move(hooks);
+    RuntimeConfig              old_settings        = settings;
+    int                        old_next_hook_id    = next_hook_id;
 
     keybinds.clear();
     monitor_rules.clear();
     input_rules.clear();
+    wallpaper_rules.clear();
     hooks.clear();
     next_hook_id = 1;
     settings     = RuntimeConfig{};
@@ -2136,20 +2328,22 @@ bool LuaConfig::reload() {
         if(old_L) { lua_close(old_L); }
         wlr_log(WLR_INFO,
                 "rc.lua reload ok: %zu keybind(s), %zu monitor rule(s), "
-                "%zu input rule(s), %zu hook(s)",
+                "%zu input rule(s), %zu wallpaper rule(s), %zu hook(s)",
                 keybinds.size(),
                 monitor_rules.size(),
                 input_rules.size(),
+                wallpaper_rules.size(),
                 hooks.size());
     } else {
         if(L) { lua_close(L); }
-        L             = old_L;
-        keybinds      = std::move(old_keybinds);
-        monitor_rules = std::move(old_rules);
-        input_rules   = std::move(old_input_rules);
-        hooks         = std::move(old_hooks);
-        next_hook_id  = old_next_hook_id;
-        settings      = old_settings;
+        L               = old_L;
+        keybinds        = std::move(old_keybinds);
+        monitor_rules   = std::move(old_rules);
+        input_rules     = std::move(old_input_rules);
+        wallpaper_rules = std::move(old_wallpaper_rules);
+        hooks           = std::move(old_hooks);
+        next_hook_id    = old_next_hook_id;
+        settings        = old_settings;
         wlr_log(WLR_ERROR,
                 "rc.lua reload failed, keeping previous config running");
     }

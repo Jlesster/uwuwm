@@ -31,6 +31,7 @@ extern "C" {
 #include "session_lock.hpp"
 #include "toplevel.hpp"
 #include "view.hpp"
+#include "wallpaper.hpp"
 #include "xwayland_view.hpp"
 
 #include <sys/wait.h>
@@ -742,6 +743,7 @@ void Server::reloadConfig() {
             out->applyRule(*rule);
         }
         out->updateBackground();
+        applyWallpaper(*out);
     }
     arrangeAllOutputs();
 

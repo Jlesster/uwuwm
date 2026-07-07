@@ -226,6 +226,40 @@ function uwu.monitor.set(name, opts) end
 ---@return uwu.MonitorInfo[]
 function uwu.monitor.list() end
 
+-- ── wallpaper ────────────────────────────────────────────────────────────
+
+---@class uwu.WallpaperOpts
+---@field path string Image path. A leading "~" is expanded to $HOME.
+---@field mode? "fill"|"fit"|"stretch"|"center"|"tile" Default "fill".
+
+---@class uwu.WallpaperInfo
+---@field name string Output name, or "*" for the fallback default.
+---@field path string
+---@field mode "fill"|"fit"|"stretch"|"center"|"tile"
+
+---@class uwu.wallpaper
+uwu.wallpaper = {}
+
+---Sets output `name`'s wallpaper ("*" = fallback default for any output
+---without a more specific wallpaper rule). Decoded natively -- there's
+---no external process involved, see src/wallpaper.hpp. A bad path or an
+---undecodable image is logged and leaves background_color as the only
+---thing visible on the affected output(s), never a hard error.
+---@param name string
+---@param opts uwu.WallpaperOpts
+function uwu.wallpaper.set(name, opts) end
+
+---Clears output `name`'s wallpaper rule ("*" clears the fallback
+---default, not every output at once -- clear each exact name too if
+---that's what you want), uncovering background_color.
+---@param name string
+function uwu.wallpaper.clear(name) end
+
+---Lists every wallpaper rule currently set (one entry per name/"*"
+---selector, not one per connected output).
+---@return uwu.WallpaperInfo[]
+function uwu.wallpaper.list() end
+
 -- ── input devices ────────────────────────────────────────────────────────
 
 ---@class uwu.InputOpts

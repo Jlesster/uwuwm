@@ -14,6 +14,7 @@ extern "C" {
 #include "server.hpp"
 #include "session_lock.hpp"
 #include "view.hpp"
+#include "wallpaper.hpp"
 
 #include <algorithm>
 #include <ctime>
@@ -209,6 +210,15 @@ Output::Output(Server& server, struct wlr_output* wlr_output)
     wlr_scene_node_set_position(
         &background_rect->node, layout_box.x, layout_box.y);
 
+    // Must run after background_rect exists, not folded into the
+    // updateLayoutBox() call just above -- wlr_scene stacks a node
+    // created later on top of one created earlier, so building the
+    // wallpaper before background_rect exists would leave the solid
+    // color painted *over* it instead of the other way around. See
+    // updateLayoutBox()'s own `if(background_rect)`-guarded reapply for
+    // every subsequent resize/transform change.
+    applyWallpaper(*this);
+
     // Hot path: raw notify, no Listener<T> wrapper. See listener.hpp's
     // header comment and the doc's §2.1 for why this one callback is
     // different from every other one in the codebase.
@@ -242,6 +252,15 @@ Output::~Output() {
 
     // Unlike background_rect (never explicitly destroyed -- it lives
     // under a shared layer_tree that outlives any one Output, and letting
+    // it go stale silently is harmless), a wallpaper node's wlr_buffer
+    // keeps a full decoded image's pixel data alive for as long as the
+    // node exists -- worth being explicit about releasing on unplug
+    // rather than leaning on the same "harmless stale node" precedent,
+    // since here "stale" means "still holding megabytes of pixels".
+    clearWallpaperNodes(*this);
+
+    // Unlike background_rect (never explicitly destroyed -- it lives
+    // under a shared layer_tree that outlives any one Output, and letting
     // it go stale silently is harmless), a black lock backdrop surviving
     // an output unplug mid-lock would be actively misleading: nothing
     // else will ever destroy this one, since it isn't parented under
@@ -269,6 +288,14 @@ void Output::updateLayoutBox() {
             background_rect, layout_box.width, layout_box.height);
         wlr_scene_node_set_position(
             &background_rect->node, layout_box.x, layout_box.y);
+
+        // Every placement mode (fill/fit/stretch/center/tile) depends on
+        // layout_box's width/height/position, so a resize or transform
+        // change has to re-derive it from scratch exactly like
+        // background_rect's own size/position just above -- guarded the
+        // same way, since this can't run before background_rect exists
+        // either (see the constructor's own explicit initial call).
+        applyWallpaper(*this);
     }
 
     // A resolution/scale/transform change (uwu.monitor.set via rc.lua

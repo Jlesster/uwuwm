@@ -4,6 +4,8 @@ extern "C" {
 struct lua_State;
 }
 
+#include "wallpaper.hpp"
+
 #include <cstdint>
 #include <map>
 #include <string>
@@ -303,6 +305,16 @@ public:
     // matching device -- see InputRule's doc comment above for the
     // exact-name > type-selector > wildcard matching rule.
     std::vector<InputRule> input_rules;
+
+    // Populated by uwu.wallpaper.set() calls in rc.lua (and by any later
+    // runtime uwu.wallpaper.set()/clear() calls from keybinds/scripts).
+    // Unlike monitor_rules (only exact-name matches are re-applied live;
+    // a "*" wildcard needs a reload to reach already-connected outputs --
+    // see findMonitorRule's doc comment), l_wallpaper_set/l_wallpaper_clear
+    // re-sweep every currently-connected output through findWallpaperRule
+    // immediately, since "*" is the common case here (one wallpaper for
+    // every monitor) rather than the exception.
+    std::vector<WallpaperRule> wallpaper_rules;
 
     bool reload_pending = false;
 

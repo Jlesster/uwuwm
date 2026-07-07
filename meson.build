@@ -130,6 +130,7 @@ src = files(
     'src/dwindle.cpp',
     'src/idle.cpp',
     'src/toplevel.cpp',
+    'src/wallpaper.cpp',
     'src/xwayland_view.cpp',
     'src/view.cpp',
     'src/session_lock.cpp',

@@ -45,6 +45,7 @@ local palettes = require('nyaa.palettes')
 local nyaa = {}
 
 nyaa.export = require('nyaa.export')
+nyaa.wallpaper = require('nyaa.wallpaper')
 
 -- Only the color pair a palette actually owns. Add more presets here
 -- freely -- each is just border_color_active/inactive, nothing more,
@@ -169,17 +170,35 @@ end
 -- nyaa.wear({ flavor = "catppuccin_mocha", gap = 8 }) -- also sets
 --   background_color from the flavor's `base`, not just the two border
 --   colors a preset gives you.
+-- nyaa.wear({ flavor = "catppuccin_mocha", wallpaper = "~/Pictures/wall.png",
+--   wallpaper_opts = { mode = "fill" } }) -- sets background_color as
+--   above *and* hands wallpaper/wallpaper_opts to nyaa.wallpaper.set()
+--   once every uwu.set() field has landed, so the flavor's background
+--   color is already the fallback underneath if swaybg is missing.
 --
 -- `preset`/`flavor` (mutually exclusive, optional) seed the table from
 -- nyaa.presets[name]/nyaa.palette(name); every other field overrides/
 -- extends it. Whatever's left is pushed straight through uwu.set()
 -- field-by-field, and also handed back so callers can read e.g.
--- `nyaa.wear({...}).gap` without a second lookup.
+-- `nyaa.wear({...}).gap` without a second lookup. `wallpaper`/
+-- `wallpaper_opts` are pulled out before that field-by-field pass (see
+-- below) since neither is a real uwu.set() field.
 function nyaa.wear(theme)
   theme = theme or {}
   if theme.preset and theme.flavor then
     error("nyaa.wear: pass 'preset' or 'flavor', not both")
   end
+  -- Pulled out before the VISUAL_FIELDS loop below since neither is a
+  -- uwu.set() field at all -- nyaa.wallpaper is a tracked external
+  -- client, not compositor state (see lib/nyaa/wallpaper.lua's header
+  -- comment). Applied last, after background_color lands, so the
+  -- fallback color is already in place underneath if swaybg is missing
+  -- or the image path is bad.
+  local wallpaper_path = theme.wallpaper
+  local wallpaper_opts = theme.wallpaper_opts
+  theme.wallpaper = nil
+  theme.wallpaper_opts = nil
+
   local merged = {}
 
   if theme.preset then
@@ -221,6 +240,10 @@ function nyaa.wear(theme)
     if merged[name] ~= nil then
       uwu.set(name, merged[name])
     end
+  end
+
+  if wallpaper_path then
+    merged.wallpaper = nyaa.wallpaper.set(wallpaper_path, wallpaper_opts)
   end
 
   return merged

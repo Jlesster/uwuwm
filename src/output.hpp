@@ -11,6 +11,7 @@ extern "C" {
 #include <cstdint>
 #include <list>
 #include <memory>
+#include <vector>
 
 class Server;
 struct MonitorRule;
@@ -41,6 +42,16 @@ struct Output {
     // per-output map.
     wlr_scene_rect*     lock_backdrop = nullptr;
     SessionLockSurface* lock_surface  = nullptr;
+
+    // Native, compositor-drawn wallpaper -- see wallpaper.hpp/cpp.
+    // Exactly one node for fill/fit/stretch/center, a full grid for
+    // Tile; empty whenever no uwu.wallpaper.set() rule resolves for this
+    // output (background_rect alone is then all that's visible). Always
+    // rebuilt from scratch by applyWallpaper() rather than diffed in
+    // place -- see that function's own comment for why that's fine to do
+    // on every resize/rule change instead of trying to patch nodes
+    // in-place.
+    std::vector<wlr_scene_buffer*> wallpaper_nodes;
 
     wlr_box
         layout_box{};  // position+size in output-layout (global) coordinates
