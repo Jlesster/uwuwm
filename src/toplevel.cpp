@@ -208,18 +208,35 @@ void XdgToplevel::handleCommit(wlr_surface* /*surface*/) {
     // independent of any resize we initiated, so re-check every time
     // rather than only on initial_commit.
     const wlr_box& client_geo = xdg_toplevel->base->geometry;
-    if(client_geo.x != content_offset_x || client_geo.y != content_offset_y) {
+    if(client_geo.x != content_offset_x || client_geo.y != content_offset_y ||
+       client_geo.width != content_clip_w ||
+       client_geo.height != content_clip_h) {
         content_offset_x = client_geo.x;
         content_offset_y = client_geo.y;
+        content_clip_w   = client_geo.width;
+        content_clip_h   = client_geo.height;
         applyBoxToScene(geo);
     }
 }
 
 void XdgToplevel::configureBackend(const wlr_box& box) {
     int b = server.lua_cfg.settings.border_px;
-    wlr_xdg_toplevel_set_size(xdg_toplevel,
-                              std::max(0, box.width - 2 * b),
-                              std::max(0, box.height - 2 * b));
+    // CSD clients (Firefox, Zen, anything GTK/Qt) declare their visible
+    // chrome rect via xdg_surface.set_window_geometry with a non-zero
+    // x/y for the CSD drop-shadow band. The buffer they allocate needs
+    // to be (chrome + 2*shadow) -- send the larger size so the buffer
+    // fits both the chrome and the shadow the client will draw around
+    // it. Same role XWaylandView::configureBackend plays with
+    // _GTK_FRAME_EXTENTS; XDG has no separate right/bottom extents, so
+    // symmetric-shadow assumption (every GTK/Qt CSD client in practice).
+    // First call (from handleMap via layout::arrange) has
+    // content_offset_x/y == 0, so this degrades to the plain content
+    // size; the client's first commit then declares the real geometry
+    // and handleCommit updates content_offset_x/y for subsequent
+    // configures.
+    int w = box.width  - 2 * b + 2 * content_offset_x;
+    int h = box.height - 2 * b + 2 * content_offset_y;
+    wlr_xdg_toplevel_set_size(xdg_toplevel, std::max(1, w), std::max(1, h));
 }
 
 void XdgToplevel::activateBackend(bool activated) {

@@ -99,6 +99,18 @@ struct View {
     int content_offset_x = 0;
     int content_offset_y = 0;
 
+    // Last-applied clip size (xdg_surface geometry width/height). Tracked
+    // separately from content_offset_x/y because geometry can change size
+    // on a commit without its x/y origin moving -- GTK/Gecko clients in
+    // particular resize their declared window geometry without shifting
+    // the CSD shadow origin, and each such commit still needs the scene
+    // clip re-applied or the client's surface buffer (which can lag or
+    // overshoot the declared geometry by a frame, notably in Firefox/Zen)
+    // bleeds past the border instead of being cut off at the chrome
+    // boundary. 0 means "no clip applied yet".
+    int content_clip_w = 0;
+    int content_clip_h = 0;
+
     std::string title;
     std::string app_id;
 
@@ -272,6 +284,39 @@ protected:
     // (the real, immediate placement) and by tickAnimation (the
     // intermediate, per-frame placement during a tween).
     void applyBoxToScene(const wlr_box& box);
+
+    // Backend-specific scene-buffer positioning hook, called from
+    // applyBoxToScene right after content_tree has been placed at (b, b)
+    // of scene_tree. Default no-op because XdgToplevel doesn't need it --
+    // its content_tree is a wlr_scene_xdg_surface_create tree whose inner
+    // surface_tree is auto-positioned by wlroots on every commit, so the
+    // visible chrome already lands at (b, b) once content_tree is at
+    // (b, b). XWaylandView overrides this to position its scene buffer
+    // (a plain wlr_scene_surface, no wlroots auto-shift) at
+    // (-content_offset_x, -content_offset_y) of content_tree, so the
+    // X window's visible chrome -- which starts at
+    // (content_offset_x, content_offset_y) in X-window-local coordinates
+    // -- also lands at (b, b). No-op if the buffer hasn't been created
+    // yet (pre-associate XWayland surface) or content_offset_x/y are 0
+    // (non-CSD X11 client).
+    virtual void applyContentOffsetToScene(const wlr_box& /*box*/) {}
+
+    // The clip box for content_tree, in content_tree's own local
+    // coordinate space. `box` is whatever applyBoxToScene is currently
+    // placing this view at (the final geo, or an in-progress animation
+    // frame) -- XdgToplevel ignores it and clips to the client's
+    // declared xdg_surface window-geometry instead (see override), but
+    // XWaylandView has no equivalent client-declared geometry to clip
+    // to, so it clips to `box` itself. Either way this exists so a
+    // surface buffer that overshoots or lags behind what it was actually
+    // allocated -- CSD shadow margins, or a client (Gecko-based ones,
+    // namely Firefox/Zen, are particularly prone to this mid-resize)
+    // committing a differently-sized buffer than expected -- gets cut
+    // off at the chrome boundary instead of bleeding past the border.
+    // Width == 0 means "no clip".
+    virtual wlr_box contentClipBox(const wlr_box& /*box*/) const {
+        return wlr_box{};
+    }
 
     // Sets uniform opacity across every buffer node under content_tree
     // (via wlr_scene_buffer_set_opacity) and scales the border rects'

@@ -1,6 +1,7 @@
 #pragma once
 
 extern "C" {
+#include <wlr/types/wlr_scene.h>
 #include <wlr/util/box.h>
 }
 
@@ -43,8 +44,31 @@ struct XWaylandView : public View {
     void         closeBackend() override;
     void         setFullscreenBackend(bool fullscreen) override;
     wlr_surface* wlrSurface() const override { return xsurface->surface; }
+    wlr_box      contentClipBox(const wlr_box& box) const override;
+    void         applyContentOffsetToScene(const wlr_box& box) override;
+
+    // _GTK_FRAME_EXTENTS right/bottom components (left/top reuse the
+    // base View's content_offset_x/y -- see xwayland_view.cpp's
+    // fetchGtkFrameExtents and handleMap for where these get set, and
+    // configureBackend/contentClipBox for where they're consumed). 0 for
+    // any client that doesn't set the property, which keeps this a no-op
+    // for non-GTK / non-CSD X11 clients.
+    int frame_right  = 0;
+    int frame_bottom = 0;
 
 private:
+    // The wlr_scene_surface attached under content_tree by
+    // handleAssociate. Null until associate fires (an XWaylandView is
+    // constructed in the X server's "window exists but not yet bound to
+    // a wl_surface" window, and the scene-surface can't be created
+    // before then). applyContentOffsetToScene reads it to shift the
+    // buffer so the X window's visible chrome lands at (b, b) of
+    // scene_tree; the regular scene-graph teardown path doesn't need
+    // to know about it (the scene-surface self-destroys when
+    // xsurface->surface does, same as in the current code -- see
+    // handleAssociate / handleDissociate).
+    wlr_scene_surface* scene_surface = nullptr;
+
     void handleAssociate();
     void handleDissociate();
     void handleMap();

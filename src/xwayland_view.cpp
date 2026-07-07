@@ -87,6 +87,58 @@ bool hasFixedSize(wlr_xwayland_surface* xsurface) {
 
 }  // namespace
 
+// GTK CSD clients (including Firefox and Zen) on X11 set _GTK_FRAME_EXTENTS
+// -- four CARDINALs (left, right, top, bottom) -- to tell the window
+// manager how much of their actual X window is an invisible-ish drop
+// shadow around the *real* visible chrome, rather than content that
+// should be treated as the window's real bounds. This is the X11
+// equivalent of xdg_surface's window-geometry that XdgToplevel::handleCommit
+// already corrects for via content_offset_x/y; X11 has no built-in
+// protocol concept for it; it's purely an ad-hoc GTK convention that a
+// compositor has to opt into reading, and until now uwuwm never did.
+// Without this, both the position sent to the client (border ends up
+// hugging the shadow's outer edge, not the real chrome) and the clip
+// (which cut at the whole window's bounds, i.e. shadow included) treat
+// the shadow band as if it were real content -- exactly what looks like
+// "the shadow is included in the bounding box."
+static bool fetchGtkFrameExtents(Server&               server,
+                                 wlr_xwayland_surface* xsurface,
+                                 int&                  left,
+                                 int&                  right,
+                                 int&                  top,
+                                 int&                  bottom) {
+    if(!server.xwayland) { return false; }
+    xcb_connection_t* conn = wlr_xwayland_get_xwm_connection(server.xwayland);
+    if(!conn) { return false; }
+
+    static xcb_atom_t frame_extents_atom =
+        internAtomCached(conn, "_GTK_FRAME_EXTENTS");
+    if(frame_extents_atom == XCB_ATOM_NONE) { return false; }
+
+    xcb_get_property_cookie_t cookie = xcb_get_property(conn,
+                                                        0,
+                                                        xsurface->window_id,
+                                                        frame_extents_atom,
+                                                        XCB_ATOM_CARDINAL,
+                                                        0,
+                                                        4);
+    xcb_get_property_reply_t* reply =
+        xcb_get_property_reply(conn, cookie, nullptr);
+    if(!reply) { return false; }
+
+    bool ok = reply->type == XCB_ATOM_CARDINAL && reply->format == 32 &&
+              xcb_get_property_value_length(reply) >= 16;
+    if(ok) {
+        auto* vals = static_cast<uint32_t*>(xcb_get_property_value(reply));
+        left       = static_cast<int>(vals[0]);
+        right      = static_cast<int>(vals[1]);
+        top        = static_cast<int>(vals[2]);
+        bottom     = static_cast<int>(vals[3]);
+    }
+    free(reply);
+    return ok;
+}
+
 XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
     : View(server), xsurface(xsurface) {
     xsurface->data = this;
@@ -154,7 +206,8 @@ void XWaylandView::handleAssociate() {
                          [this](void*) { handleMap(); });
     unmap.connect(&xsurface->surface->events.unmap,
                   [this](void*) { handleUnmap(); });
-    wlr_scene_surface_create(content_tree, xsurface->surface);
+    scene_surface =
+        wlr_scene_surface_create(content_tree, xsurface->surface);
 }
 
 void XWaylandView::handleDissociate() {
@@ -167,7 +220,6 @@ void XWaylandView::handleDissociate() {
 
 void XWaylandView::handleMap() {
     mapped = true;
-    wlr_scene_node_set_enabled(&content_tree->node, true);
 
     if(unmanaged) {
         // No tiling, no border, no focus-follows -- position exactly
@@ -178,6 +230,7 @@ void XWaylandView::handleMap() {
             xsurface->x, xsurface->y, xsurface->width, xsurface->height};
         wlr_scene_node_set_position(&scene_tree->node, geo.x, geo.y);
         wlr_scene_node_raise_to_top(&scene_tree->node);
+        wlr_scene_node_set_enabled(&content_tree->node, true);
         return;
     }
 
@@ -198,6 +251,19 @@ void XWaylandView::handleMap() {
     if(xsurface->title) { title = xsurface->title; }
     if(xsurface->class_) { app_id = xsurface->class_; }
 
+    // Must happen before the arrange()/setGeometry() calls below --
+    // configureBackend and contentClipBox both read content_offset_x/y
+    // and frame_right/frame_bottom, and we want the very first configure
+    // this window ever gets to already account for its shadow, not a
+    // visible correction one frame later.
+    int fl = 0, fr = 0, ft = 0, fb = 0;
+    if(fetchGtkFrameExtents(server, xsurface, fl, fr, ft, fb)) {
+        content_offset_x = fl;
+        content_offset_y = ft;
+        frame_right      = fr;
+        frame_bottom     = fb;
+    }
+
     if(output) { layout::arrange(*output); }
 
     if(is_floating && output) {
@@ -205,6 +271,17 @@ void XWaylandView::handleMap() {
         floating_geo = box;
         setGeometry(box);
     }
+
+    // Only now -- after scene_tree/content_tree have been placed at
+    // their real tiled-or-floating position by arrange()/setGeometry()
+    // above -- do we make content visible. Enabling it any earlier risks
+    // a frame showing content_tree at its stale construction-time
+    // position (0,0 relative to its parent, i.e. the output's top-left
+    // corner) rather than wherever this window actually belongs, if a
+    // repaint is ever triggered from within arrange()/setGeometry()
+    // itself (e.g. a synchronous frame callback fired by the backend) --
+    // exactly the "chrome floats at the top-left corner" symptom.
+    wlr_scene_node_set_enabled(&content_tree->node, true);
 
     createForeignToplevel();
     server.focusView(this);
@@ -310,14 +387,61 @@ void XWaylandView::handleSetClass() {
     syncForeignToplevelMeta();
 }
 
-void XWaylandView::configureBackend(const wlr_box& box) {
+// X11 has no xdg_surface-style client-declared window geometry, but GTK
+// CSD clients on X11 get the closest equivalent via _GTK_FRAME_EXTENTS
+// (fetchGtkFrameExtents, above/handleMap) -- content_offset_x/y hold its
+// left/top components (reusing the same base-View fields XdgToplevel
+// populates from client_geo.x/y), so the clip's origin sits inset past
+// the shadow exactly like XdgToplevel's does. Clients that never set the
+// property leave content_offset_x/y at 0, which reduces this to "clip to
+// box's own inner dimensions starting at (0,0)" -- still a needed guard
+// on its own, since an Xwayland client's actual surface buffer can lag
+// behind or overshoot the size uwuwm configured it to (Gecko-based
+// clients -- Firefox, Zen -- are the routine offenders, especially right
+// after mapping with a restored/stale window size before their first
+// post-tile redraw catches up), which previously bled straight past the
+// border with nothing to stop it.
+wlr_box XWaylandView::contentClipBox(const wlr_box& box) const {
     int b = server.lua_cfg.settings.border_px;
+    int w = box.width - 2 * b;
+    int h = box.height - 2 * b;
+    return wlr_box{
+        content_offset_x, content_offset_y, w > 0 ? w : 0, h > 0 ? h : 0};
+}
+
+// XWayland has no xdg_surface-style auto-shifted inner scene tree the
+// way wlr_scene_xdg_surface_create gives XdgToplevel -- content_tree is
+// a plain wlr_scene_tree, and the scene_surface (a wlr_scene_buffer)
+// inside it sits at (0, 0) by default. The X window's visible chrome,
+// though, starts at (content_offset_x, content_offset_y) in X-window-
+// local coordinates (the _GTK_FRAME_EXTENTS top/left inset); with
+// content_tree now at (b, b) of scene_tree (see View::applyBoxToScene),
+// the chrome would otherwise land at (b + content_offset_x, b +
+// content_offset_y) -- past the border's inner edge by the CSD shadow
+// size. Shifting the buffer by (-content_offset_x, -content_offset_y)
+// pulls the chrome's top-left back to (0, 0) of content_tree = (b, b)
+// of scene_tree, where the border wants it. No-op when the
+// scene_surface hasn't been created yet (pre-associate XWayland
+// surface) or when content_offset_x/y are both 0 (non-CSD X11 client --
+// common, no shifting needed).
+void XWaylandView::applyContentOffsetToScene(const wlr_box& /*box*/) {
+    if(!scene_surface) { return; }
+    wlr_scene_node_set_position(
+        &scene_surface->buffer->node, -content_offset_x, -content_offset_y);
+}
+
+void XWaylandView::configureBackend(const wlr_box& box) {
+    int b  = server.lua_cfg.settings.border_px;
+    int vw = box.width - 2 * b;
+    int vh = box.height - 2 * b;
+    if(vw < 1) { vw = 1; }
+    if(vh < 1) { vh = 1; }
     wlr_xwayland_surface_configure(
         xsurface,
-        static_cast<int16_t>(box.x + b),
-        static_cast<int16_t>(box.y + b),
-        static_cast<uint16_t>(std::max(1, box.width - 2 * b)),
-        static_cast<uint16_t>(std::max(1, box.height - 2 * b)));
+        static_cast<int16_t>(box.x + b - content_offset_x),
+        static_cast<int16_t>(box.y + b - content_offset_y),
+        static_cast<uint16_t>(vw + content_offset_x + frame_right),
+        static_cast<uint16_t>(vh + content_offset_y + frame_bottom));
 }
 
 void XWaylandView::activateBackend(bool activated) {

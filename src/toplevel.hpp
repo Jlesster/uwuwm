@@ -27,7 +27,12 @@ struct XdgToplevel : public View {
     void         activateBackend(bool activated) override;
     void         closeBackend() override;
     void         setFullscreenBackend(bool fullscreen) override;
-    wlr_surface* wlrSurface() const override { return xdg_toplevel->base->surface; }
+    wlr_surface* wlrSurface() const override {
+        return xdg_toplevel->base->surface;
+    }
+    wlr_box contentClipBox(const wlr_box& /*box*/) const override {
+        return xdg_toplevel->base->geometry;
+    }
 
 private:
     void handleMap();
