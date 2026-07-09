@@ -484,9 +484,21 @@ wlr_box XWaylandView::contentClipBox(const wlr_box& box) const {
 // first setGeometry, in practice), but we guard anyway because the
 // OR-window path can skip handleMap's managed branch entirely.
 void XWaylandView::applyContentOffsetToScene(const wlr_box& /*box*/) {
-    if(!scene_surface) { return; }
+    if(!content_tree) { return; }
+    int b = server.lua_cfg.settings.border_px;
+    // applyBoxToScene has already placed content_tree at (b, b) of
+    // scene_tree before calling us; slide it back by the CSD shadow
+    // offset so the auto-positioned buffer (which
+    // wlr_scene_subsurface_tree_set_clip -- called right after this --
+    // places at (content_offset_x, content_offset_y) of content_tree)
+    // lands at (b, b) of scene_tree, not (b + content_offset_x,
+    // b + content_offset_y). Moving scene_surface here instead is a
+    // no-op: the clip call that immediately follows re-positions
+    // scene_surface to (content_offset_x, content_offset_y) of
+    // content_tree unconditionally, clobbering any position we set on
+    // it ourselves.
     wlr_scene_node_set_position(
-        &scene_surface->node, -content_offset_x, -content_offset_y);
+        &content_tree->node, b - content_offset_x, b - content_offset_y);
 }
 
 void XWaylandView::configureBackend(const wlr_box& box) {
