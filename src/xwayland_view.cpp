@@ -74,6 +74,26 @@ bool isDialogWindowType(Server& server, wlr_xwayland_surface* xsurface) {
 // max here are only meaningful if the client actually set the
 // corresponding ICCCM flag bits -- an all-zero, never-touched
 // xcb_size_hints_t would otherwise misread as "0x0 fixed size."
+//
+// A real fixed-size window (color picker, confirm prompt, file chooser)
+// is dialog-sized -- comfortably under a display's usable area. But
+// GTK/Gecko toplevels can transiently report min==max at the exact
+// dimensions of their *current* natural size before their real content
+// has settled (observed with Firefox's crash-recovery "Restore Session"
+// page, which briefly pins min==max to whatever size it first painted
+// at). That's a false positive: a plain top-level browser window, not a
+// dialog, and treating it as fixed-size latches is_floating permanently
+// for it (handleMap only checks once), which later lets
+// handleRequestConfigure honor the client's own self-chosen size instead
+// of re-asserting the tile -- the window's content and border end up
+// sized to whatever Gecko wants rather than the assigned tile, bleeding
+// past the tile's right/bottom edge with no border or gap left to show
+// for it. kMaxFixedSizeDialogDim rules those out: anything claiming a
+// "fixed" size larger than a generous dialog ceiling in either dimension
+// is far more likely to be a normal resizable toplevel caught mid-negotiation
+// than an actual dialog.
+constexpr int kMaxFixedSizeDialogDim = 800;
+
 bool hasFixedSize(wlr_xwayland_surface* xsurface) {
     xcb_size_hints_t* sh = xsurface->size_hints;
     if(!sh) { return false; }
@@ -82,7 +102,9 @@ bool hasFixedSize(wlr_xwayland_surface* xsurface) {
         return false;
     }
     return sh->min_width > 0 && sh->min_height > 0 &&
-           sh->min_width == sh->max_width && sh->min_height == sh->max_height;
+           sh->min_width == sh->max_width && sh->min_height == sh->max_height &&
+           sh->min_width <= kMaxFixedSizeDialogDim &&
+           sh->min_height <= kMaxFixedSizeDialogDim;
 }
 
 }  // namespace
@@ -144,8 +166,6 @@ XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
     xsurface->data = this;
     unmanaged      = xsurface->override_redirect;
 
-    int border_px = server.lua_cfg.settings.border_px;
-
     scene_tree            = wlr_scene_tree_create(server.window_tree);
     scene_tree->node.data = this;
 
@@ -160,13 +180,12 @@ XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
         rect = wlr_scene_rect_create(border_tree, 0, 0, color);
     }
 
-    // Plain empty tree so `content_tree`'s field type matches XdgToplevel
-    // (a wlr_scene_tree*) -- the actual surface buffer only exists once
-    // handleAssociate() fires and gets nested one level inside via
-    // wlr_scene_surface_create(). Disabled until then: nothing to show.
-    content_tree = wlr_scene_tree_create(scene_tree);
-    wlr_scene_node_set_position(&content_tree->node, border_px, border_px);
-    wlr_scene_node_set_enabled(&content_tree->node, false);
+    // content_tree stays null until handleAssociate(): the wlroots
+    // subsurface tree we want to put here (wlr_scene_subsurface_tree_create)
+    // needs a real wl_surface*, which only exists from associate onward --
+    // the same pre-associate-vs-post-associate split that motivates
+    // handleAssociate itself (xwayland_view.hpp's class doc). Nothing
+    // visualizes before associate anyway, so the null window is harmless.
 
     if(xsurface->title) { title = xsurface->title; }
     if(xsurface->class_) { app_id = xsurface->class_; }
@@ -200,22 +219,37 @@ XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
 XWaylandView::~XWaylandView() = default;
 
 void XWaylandView::handleAssociate() {
-    // Only from this point does xsurface->surface exist -- hook the
-    // surface-level map/unmap and put its content into our tree.
     map_listener.connect(&xsurface->surface->events.map,
                          [this](void*) { handleMap(); });
     unmap.connect(&xsurface->surface->events.unmap,
                   [this](void*) { handleUnmap(); });
     scene_surface =
-        wlr_scene_surface_create(content_tree, xsurface->surface);
+        wlr_scene_subsurface_tree_create(content_tree, xsurface->surface);
+    surface_commit.connect(&xsurface->surface->events.commit,
+                           [this](void*) { handleSurfaceCommit(); });
 }
 
 void XWaylandView::handleDissociate() {
     map_listener.disconnect();
     unmap.disconnect();
-    // The scene node wlr_scene_surface_create attached above destroys
-    // itself when xsurface->surface is destroyed, same guarantee
-    // wlr_scene_xdg_surface_create gives XdgToplevel's content_tree.
+    surface_commit.disconnect();
+}
+
+void XWaylandView::handleSurfaceCommit() {
+    if(!mapped || unmanaged) { return; }
+
+    applyBoxToScene(geo);
+
+    if(is_floating) { return; }
+
+    int b = server.lua_cfg.settings.border_px;
+    int expected_w =
+        std::max(1, geo.width - 2 * b) + content_offset_x + frame_right;
+    int expected_h =
+        std::max(1, geo.height - 2 * b) + content_offset_y + frame_bottom;
+    if(xsurface->width != expected_w || xsurface->height != expected_h) {
+        configureBackend(geo);
+    }
 }
 
 void XWaylandView::handleMap() {
@@ -230,7 +264,14 @@ void XWaylandView::handleMap() {
             xsurface->x, xsurface->y, xsurface->width, xsurface->height};
         wlr_scene_node_set_position(&scene_tree->node, geo.x, geo.y);
         wlr_scene_node_raise_to_top(&scene_tree->node);
-        wlr_scene_node_set_enabled(&content_tree->node, true);
+        // content_tree is created in handleAssociate (deferred, because
+        // the subsurface tree needs a real wl_surface*); it's normally
+        // non-null here, but a malformed OR window that associated
+        // without a backing wl_surface would leave it null -- skip the
+        // enable rather than deref a null node.
+        if(content_tree) {
+            wlr_scene_node_set_enabled(&content_tree->node, true);
+        }
         return;
     }
 
@@ -391,16 +432,23 @@ void XWaylandView::handleSetClass() {
 // CSD clients on X11 get the closest equivalent via _GTK_FRAME_EXTENTS
 // (fetchGtkFrameExtents, above/handleMap) -- content_offset_x/y hold its
 // left/top components (reusing the same base-View fields XdgToplevel
-// populates from client_geo.x/y), so the clip's origin sits inset past
-// the shadow exactly like XdgToplevel's does. Clients that never set the
-// property leave content_offset_x/y at 0, which reduces this to "clip to
-// box's own inner dimensions starting at (0,0)" -- still a needed guard
-// on its own, since an Xwayland client's actual surface buffer can lag
-// behind or overshoot the size uwuwm configured it to (Gecko-based
-// clients -- Firefox, Zen -- are the routine offenders, especially right
-// after mapping with a restored/stale window size before their first
-// post-tile redraw catches up), which previously bled straight past the
-// border with nothing to stop it.
+// populates from client_geo.x/y). The clip is in wl_surface / X-window
+// coordinate space (see subsurface_tree.c:69-101 + surface.c:115-147 for
+// the API's actual semantics -- it sets a source-box crop on the buffer
+// in surface space, not a scene-graph rect), so the clip's origin is
+// inset past the CSD shadow exactly like XdgToplevel's geometry-based
+// clip is. Clients that never set _GTK_FRAME_EXTENTS leave
+// content_offset_x/y at 0, which reduces this to "clip to the content
+// area starting at (0,0)" -- still a needed guard for any Xwayland
+// client whose actual surface buffer lags behind or overshoots the size
+// uwuwm configured it to. Gecko-based clients (Firefox, Zen) are the
+// routine offenders, especially right after mapping with a restored /
+// stale window size before their first post-tile redraw catches up --
+// they ignore the CSD shadow offset the GTK convention expects them to
+// honour and draw content for the full X-window size we configured, so
+// without this clip their content bleeds `_GTK_FRAME_EXTENTS.left`
+// (~10px) past the border on the right, exactly where the
+// `wlr_scene_subsurface_tree_set_clip` call is supposed to cut it off.
 wlr_box XWaylandView::contentClipBox(const wlr_box& box) const {
     int b = server.lua_cfg.settings.border_px;
     int w = box.width - 2 * b;
@@ -411,23 +459,34 @@ wlr_box XWaylandView::contentClipBox(const wlr_box& box) const {
 
 // XWayland has no xdg_surface-style auto-shifted inner scene tree the
 // way wlr_scene_xdg_surface_create gives XdgToplevel -- content_tree is
-// a plain wlr_scene_tree, and the scene_surface (a wlr_scene_buffer)
-// inside it sits at (0, 0) by default. The X window's visible chrome,
-// though, starts at (content_offset_x, content_offset_y) in X-window-
-// local coordinates (the _GTK_FRAME_EXTENTS top/left inset); with
-// content_tree now at (b, b) of scene_tree (see View::applyBoxToScene),
-// the chrome would otherwise land at (b + content_offset_x, b +
-// content_offset_y) -- past the border's inner edge by the CSD shadow
-// size. Shifting the buffer by (-content_offset_x, -content_offset_y)
-// pulls the chrome's top-left back to (0, 0) of content_tree = (b, b)
-// of scene_tree, where the border wants it. No-op when the
-// scene_surface hasn't been created yet (pre-associate XWayland
-// surface) or when content_offset_x/y are both 0 (non-CSD X11 client --
-// common, no shifting needed).
+// the wlr_scene_subsurface_tree_create tree itself (so the X11 path
+// doesn't get a separate "outer" tree + "inner subsurface tree" pair the
+// way the XDG path does), and wlroots auto-positions the buffer at
+// (clip.x, clip.y) of content_tree (subsurface_tree.c:96) once the
+// clip is set by View::applyBoxToScene. The X window's visible chrome
+// sits at (content_offset_x, content_offset_y) of X-window-local
+// coordinates, so the buffer is auto-placed at exactly that offset
+// inside content_tree -- if we also positioned content_tree at (b, b)
+// of scene_tree the way the XDG branch does, the visible chrome would
+// land at (b + content_offset_x, b + content_offset_y) -- past the
+// border's inner edge by the CSD shadow size. We compensate by sliding
+// content_tree itself back by (content_offset_x, content_offset_y), so
+// the auto-positioned buffer ends up at (b, b) of scene_tree -- flush
+// against the inside of the border. The clip in
+// contentClipBox (above) is what tells wlroots where the visible chrome
+// is in surface space, which both crops the source box and drives the
+// buffer's auto-position; we don't touch the buffer node directly.
+//
+// content_tree stays null until handleAssociate (where the
+// subsurface_tree_create that needs a real wl_surface* is called);
+// applyBoxToScene can call this before then for a managed X11 window
+// only in theory (handleAssociate fires before handleMap before the
+// first setGeometry, in practice), but we guard anyway because the
+// OR-window path can skip handleMap's managed branch entirely.
 void XWaylandView::applyContentOffsetToScene(const wlr_box& /*box*/) {
     if(!scene_surface) { return; }
     wlr_scene_node_set_position(
-        &scene_surface->buffer->node, -content_offset_x, -content_offset_y);
+        &scene_surface->node, -content_offset_x, -content_offset_y);
 }
 
 void XWaylandView::configureBackend(const wlr_box& box) {

@@ -53,23 +53,61 @@ function uwu.bind(mods, key, fn) end
 
 -- ── settings ─────────────────────────────────────────────────────────────
 
----Sets one of uwuwm's runtime settings (see kSettingSetters in
----lua_config.cpp): "gap", "border_width", "master_factor", "repeat_rate",
----"repeat_delay", "cursor_size", "terminal", "launcher",
----"border_color_active", "border_color_inactive", "background_color",
----"dwindle_preserve_split", "focus_follows_mouse", "inactive_opacity"
----(0.05-1.0, clamped; static per-view dim applied the moment focus leaves
----it -- see View::setFocused). An unknown name is logged and ignored, not
----an error.
+---@deprecated Use uwu.visual.set() (7 appearance fields) or
+---uwu.behavior.set() (7 app/behavior fields) instead -- each refuses the
+---other's fields outright (see kSettingCategory in lua_config.cpp), which
+---this flat form can't. Kept only so an rc.lua predating that split still
+---runs; logs a one-line notice pointing at the right one each call.
 ---@param name string
 ---@param value string|number|boolean
 function uwu.set(name, value) end
 
----Reads back one of the settings uwu.set() accepts. Returns nil (not
----an error) for an unknown name.
+---@deprecated Read-side counterpart to uwu.set() -- see its deprecation
+---note. Use uwu.visual.get()/uwu.behavior.get() instead.
 ---@param name string
 ---@return string|number|boolean|nil
 function uwu.get(name) end
+
+---@class uwu.visual
+uwu.visual = {}
+
+---Sets one of the seven *appearance* settings: "gap", "border_width",
+---"cursor_size", "border_color_active", "border_color_inactive",
+---"background_color", "inactive_opacity" (0.05-1.0, clamped; static
+---per-view dim applied the moment focus leaves it -- see
+---View::setFocused). This is what nyaa.wear() calls underneath; prefer
+---that unless you're building your own theming layer. Any of the seven
+---*behavior* names uwu.behavior.set() owns -- or a genuine typo -- is
+---refused the same way: logged and ignored, not an error.
+---@param name string
+---@param value string|number|boolean
+function uwu.visual.set(name, value) end
+
+---Reads back one of the settings uwu.visual.set() accepts. Returns nil
+---(not an error) for a name it doesn't own, same as a typo.
+---@param name string
+---@return string|number|boolean|nil
+function uwu.visual.get(name) end
+
+---@class uwu.behavior
+uwu.behavior = {}
+
+---Sets one of the seven *app/behavior* settings: "master_factor",
+---"repeat_rate", "repeat_delay", "terminal", "launcher",
+---"focus_follows_mouse", "dwindle_preserve_split". This is what
+---paw.defaults() calls underneath; prefer that unless you're building
+---your own config layer. Any of the seven *visual* names uwu.visual.set()
+---owns -- or a genuine typo -- is refused the same way: logged and
+---ignored, not an error.
+---@param name string
+---@param value string|number|boolean
+function uwu.behavior.set(name, value) end
+
+---Reads back one of the settings uwu.behavior.set() accepts. Returns nil
+---(not an error) for a name it doesn't own, same as a typo.
+---@param name string
+---@return string|number|boolean|nil
+function uwu.behavior.get(name) end
 
 -- ── focused-client actions ───────────────────────────────────────────────
 
@@ -88,41 +126,80 @@ function uwu.toggle_floating() end
 ---Toggles fullscreen on the focused client.
 function uwu.toggle_fullscreen() end
 
----Nudges the focused output's master_factor by `delta` (clamped
----internally -- see layout::incMasterFactor).
----@param delta number
-function uwu.inc_master(delta) end
-
 ---Moves compositor focus to the next (dir >= 0) or previous (dir < 0)
 ---output in output order. No-op with fewer than two outputs.
 ---@param dir? integer
 function uwu.focus_monitor(dir) end
 
 -- ── layout ───────────────────────────────────────────────────────────────
+-- uwu.layout -- tiling primitives, grouped in their own namespace instead
+-- of sitting flat on `uwu` alongside spawn/bind/quit. paw.layout
+-- (lib/paw/init.lua) wraps this the same way paw.client wraps
+-- uwu.focus_next/toggle_floating/etc; prefer paw.layout in an rc.lua
+-- unless you're writing your own tiling-facing module.
 
----Switches the *focused output's* tiling algorithm.
+---@deprecated Use uwu.layout.inc_master() instead.
+---@param delta number
+function uwu.inc_master(delta) end
+
+---@deprecated Use uwu.layout.set() instead.
 ---@param name "master"|"masterstack"|"master_stack"|"dwindle"
 function uwu.set_layout(name) end
 
----Toggles the focused client's dwindle split orientation.
+---@deprecated Use uwu.layout.dwindle.toggle_split() instead.
 function uwu.dwindle_toggle_split() end
 
----Swaps the focused client with its dwindle sibling.
+---@deprecated Use uwu.layout.dwindle.swap_split() instead.
 function uwu.dwindle_swap_split() end
 
----Rotates the focused client's dwindle split by `angle` degrees (default 90).
+---@deprecated Use uwu.layout.dwindle.rotate_split() instead.
 ---@param angle? integer
 function uwu.dwindle_rotate_split(angle) end
 
----Adjusts the focused client's dwindle split ratio by `delta`.
+---@deprecated Use uwu.layout.dwindle.splitratio() instead.
 ---@param delta number
 function uwu.dwindle_splitratio(delta) end
+
+---@deprecated Use uwu.layout.dwindle.move_to_root() instead.
+---@param stable? boolean
+function uwu.dwindle_move_to_root(stable) end
+
+---@class uwu.layout
+uwu.layout = {}
+
+---Switches the *focused output's* tiling algorithm.
+---@param name "master"|"masterstack"|"master_stack"|"dwindle"
+function uwu.layout.set(name) end
+
+---Nudges the focused output's master_factor by `delta` (clamped
+---internally -- see layout::incMasterFactor). The *absolute* starting
+---value is uwu.behavior.set("master_factor", ...) / paw.defaults's job,
+---not this.
+---@param delta number
+function uwu.layout.inc_master(delta) end
+
+---@class uwu.layout.dwindle
+uwu.layout.dwindle = {}
+
+---Toggles the focused client's dwindle split orientation.
+function uwu.layout.dwindle.toggle_split() end
+
+---Swaps the focused client with its dwindle sibling.
+function uwu.layout.dwindle.swap_split() end
+
+---Rotates the focused client's dwindle split by `angle` degrees (default 90).
+---@param angle? integer
+function uwu.layout.dwindle.rotate_split(angle) end
+
+---Adjusts the focused client's dwindle split ratio by `delta`.
+---@param delta number
+function uwu.layout.dwindle.splitratio(delta) end
 
 ---Moves the focused client back to the root of its output's dwindle
 ---tree. `stable` (default true) keeps the rest of the tree's existing
 ---split ratios; see dwindle::moveToRoot.
 ---@param stable? boolean
-function uwu.dwindle_move_to_root(stable) end
+function uwu.layout.dwindle.move_to_root(stable) end
 
 -- ── hooks ──────────────────────────────────────────────────────────────
 

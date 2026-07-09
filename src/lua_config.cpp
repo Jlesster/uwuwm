@@ -214,6 +214,37 @@ uint32_t rgbaToPacked(const float in[4]) {
            byte(in[3]);
 }
 
+// Single source of truth for which module owns which uwu.set()/uwu.get()
+// field. Before this, "is this setting visual or behavioral" only existed
+// as two independently hand-copied Lua tables (nyaa's VISUAL_FIELDS and
+// paw's BEHAVIOR_FIELDS) that could only be checked against each other by
+// reading both files side by side -- nothing stopped them drifting apart,
+// or a new setting landing here without ever being added to either. This
+// map is that boundary now, enforced once, in the one place that also
+// defines what each setting *does* -- see l_visual_set/l_visual_get and
+// l_behavior_set/l_behavior_get below, which are the only dispatchers nyaa
+// and paw call into as of this pass. uwu.set()/uwu.get() (l_set/l_get)
+// stay as deprecated, category-blind aliases over the same table, purely
+// so an old rc.lua doesn't break.
+enum class SettingCategory { Visual, Behavior };
+
+const std::unordered_map<std::string, SettingCategory> kSettingCategory = {
+    {"gap",                    SettingCategory::Visual  },
+    {"border_width",           SettingCategory::Visual  },
+    {"border_color_active",    SettingCategory::Visual  },
+    {"border_color_inactive",  SettingCategory::Visual  },
+    {"background_color",       SettingCategory::Visual  },
+    {"cursor_size",            SettingCategory::Visual  },
+    {"inactive_opacity",       SettingCategory::Visual  },
+    {"master_factor",          SettingCategory::Behavior},
+    {"repeat_rate",            SettingCategory::Behavior},
+    {"repeat_delay",           SettingCategory::Behavior},
+    {"terminal",               SettingCategory::Behavior},
+    {"launcher",               SettingCategory::Behavior},
+    {"focus_follows_mouse",    SettingCategory::Behavior},
+    {"dwindle_preserve_split", SettingCategory::Behavior},
+};
+
 using SetterFunc = std::function<void(lua_State*, RuntimeConfig&)>;
 const std::unordered_map<std::string, SetterFunc> kSettingSetters = {
     {"gap",
@@ -754,11 +785,81 @@ int l_bind(lua_State* L) {
     return 0;
 }
 
+// Category-scoped setter/getter core, shared by uwu.visual.set/get and
+// uwu.behavior.set/get below. `want` restricts which category this call
+// site is allowed to touch -- a visual name reaching uwu.behavior.set (or
+// vice versa) is refused with the same "unknown setting" tone as a
+// genuine typo, rather than silently reaching across the boundary, since
+// from the caller's side those two failure modes should look identical:
+// either way, this isn't a field you get from here.
+void dispatchSet(lua_State* L, SettingCategory want, const char* ns) {
+    const char*    name = luaL_checkstring(L, 1);
+    RuntimeConfig& s    = getConfig(L)->settings;
+
+    auto cat = kSettingCategory.find(name);
+    if(cat == kSettingCategory.end() || cat->second != want) {
+        wlr_log(WLR_ERROR, "%s.set: unknown setting '%s', ignoring", ns, name);
+        return;
+    }
+    kSettingSetters.at(name)(L, s);
+}
+
+void dispatchGet(lua_State* L, SettingCategory want, const char* ns) {
+    const char*          name = luaL_checkstring(L, 1);
+    const RuntimeConfig& s    = getConfig(L)->settings;
+
+    auto cat = kSettingCategory.find(name);
+    if(cat == kSettingCategory.end() || cat->second != want) {
+        wlr_log(
+            WLR_ERROR, "%s.get: unknown setting '%s', returning nil", ns, name);
+        lua_pushnil(L);
+        return;
+    }
+    kSettingGetters.at(name)(L, s);
+}
+
+// uwu.visual.set(name, value) -- nyaa's only way into RuntimeConfig.
+// Refuses every name kSettingCategory doesn't tag Visual (that includes
+// every Behavior field, not just typos), so nyaa can never reach a
+// setting paw owns even if its own Lua-side field list were ever wrong or
+// out of date.
+int l_visual_set(lua_State* L) {
+    dispatchSet(L, SettingCategory::Visual, "uwu.visual");
+    return 0;
+}
+
+int l_visual_get(lua_State* L) {
+    dispatchGet(L, SettingCategory::Visual, "uwu.visual");
+    return 1;
+}
+
+// uwu.behavior.set(name, value) -- paw's counterpart to uwu.visual.set().
+// Same refusal, mirrored: every Visual field is off limits here too.
+int l_behavior_set(lua_State* L) {
+    dispatchSet(L, SettingCategory::Behavior, "uwu.behavior");
+    return 0;
+}
+
+int l_behavior_get(lua_State* L) {
+    dispatchGet(L, SettingCategory::Behavior, "uwu.behavior");
+    return 1;
+}
+
+// uwu.set(name, value) / uwu.get(name) -- deprecated, category-blind
+// aliases kept only so an rc.lua written before uwu.visual/uwu.behavior
+// existed keeps working. Reaches every setting regardless of category,
+// same as before this pass; new config should call uwu.visual.*/
+// uwu.behavior.* (or nyaa.wear()/paw.defaults(), which now do exactly
+// that) directly instead.
 int l_set(lua_State* L) {
     const char*    name = luaL_checkstring(L, 1);
     RuntimeConfig& s    = getConfig(L)->settings;
 
     if(auto it = kSettingSetters.find(name); it != kSettingSetters.end()) {
+        wlr_log(WLR_INFO,
+                "uwu.set: deprecated, use uwu.visual.set/uwu.behavior.set for "
+                "'%s' instead",
+                name);
         it->second(L, s);
     } else {
         wlr_log(WLR_ERROR, "uwu.set: unknown setting '%s', ignoring", name);
@@ -769,7 +870,8 @@ int l_set(lua_State* L) {
 // uwu.get(name) -- the read half uwu.set() never had. Returns nil (not an
 // error) for an unknown name, same tolerance uwu.set() already extends
 // the other direction, so a typo surfaces as "always nil" rather than a
-// script-ending exception either way.
+// script-ending exception either way. Deprecated for the same reason
+// uwu.set() is -- see its comment just above.
 int l_get(lua_State* L) {
     const char*          name = luaL_checkstring(L, 1);
     const RuntimeConfig& s    = getConfig(L)->settings;
@@ -901,6 +1003,78 @@ int l_dwindle_move_to_root(lua_State* L) {
     bool stable = lua_isnoneornil(L, 1) ? true : lua_toboolean(L, 1);
     dwindle::moveToRoot(getServer(L)->focused_view, stable);
     return 0;
+}
+
+// ----------------------------------------------------------------------------
+// uwu.layout.* -- tiling primitives, pulled off the flat uwu table.
+//
+// set_layout/inc_master/dwindle_* used to sit directly on `uwu` alongside
+// spawn/quit/bind -- lifecycle calls with nothing to do with tiling. paw
+// (lib/paw/init.lua) is documented as "sugar over the raw uwu C API", but
+// there was no raw *tiling* namespace for it to be sugar over: it had to
+// reach past uwu.set_layout()/uwu.inc_master() as bare top-level calls,
+// same as any lifecycle function. uwu.layout groups exactly the primitives
+// paw.layout (see lib/paw/init.lua) wraps, so that relationship is a real
+// namespace-to-namespace one now instead of "sugar over eleven miscellaneous
+// entries in a flat 22-function table." The flat names below stay as
+// deprecated aliases.
+int l_layout_set(lua_State* L) { return l_set_layout(L); }
+int l_layout_inc_master(lua_State* L) { return l_inc_master(L); }
+int l_layout_dwindle_toggle_split(lua_State* L) {
+    return l_dwindle_toggle_split(L);
+}
+int l_layout_dwindle_swap_split(lua_State* L) {
+    return l_dwindle_swap_split(L);
+}
+int l_layout_dwindle_rotate_split(lua_State* L) {
+    return l_dwindle_rotate_split(L);
+}
+int l_layout_dwindle_splitratio(lua_State* L) {
+    return l_dwindle_splitratio(L);
+}
+int l_layout_dwindle_move_to_root(lua_State* L) {
+    return l_dwindle_move_to_root(L);
+}
+
+// Deprecated flat-`uwu` aliases -- same bodies as above, just logged, so
+// an rc.lua written before uwu.layout existed keeps working verbatim.
+int l_deprecated_set_layout(lua_State* L) {
+    wlr_log(WLR_INFO, "uwu.set_layout: deprecated, use uwu.layout.set");
+    return l_set_layout(L);
+}
+int l_deprecated_inc_master(lua_State* L) {
+    wlr_log(WLR_INFO, "uwu.inc_master: deprecated, use uwu.layout.inc_master");
+    return l_inc_master(L);
+}
+int l_deprecated_dwindle_toggle_split(lua_State* L) {
+    wlr_log(WLR_INFO,
+            "uwu.dwindle_toggle_split: deprecated, use "
+            "uwu.layout.dwindle.toggle_split");
+    return l_dwindle_toggle_split(L);
+}
+int l_deprecated_dwindle_swap_split(lua_State* L) {
+    wlr_log(WLR_INFO,
+            "uwu.dwindle_swap_split: deprecated, use "
+            "uwu.layout.dwindle.swap_split");
+    return l_dwindle_swap_split(L);
+}
+int l_deprecated_dwindle_rotate_split(lua_State* L) {
+    wlr_log(WLR_INFO,
+            "uwu.dwindle_rotate_split: deprecated, use "
+            "uwu.layout.dwindle.rotate_split");
+    return l_dwindle_rotate_split(L);
+}
+int l_deprecated_dwindle_splitratio(lua_State* L) {
+    wlr_log(WLR_INFO,
+            "uwu.dwindle_splitratio: deprecated, use "
+            "uwu.layout.dwindle.splitratio");
+    return l_dwindle_splitratio(L);
+}
+int l_deprecated_dwindle_move_to_root(lua_State* L) {
+    wlr_log(WLR_INFO,
+            "uwu.dwindle_move_to_root: deprecated, use "
+            "uwu.layout.dwindle.move_to_root");
+    return l_dwindle_move_to_root(L);
 }
 
 // Tag indices are 1-based on the Lua side (uwu.tag_count == 9, valid
@@ -1846,30 +2020,57 @@ const luaL_Reg kTagFuncs[] = {
     {nullptr,            nullptr           },
 };
 
+const luaL_Reg kDwindleFuncs[] = {
+    {"toggle_split", l_layout_dwindle_toggle_split},
+    {"swap_split",   l_layout_dwindle_swap_split  },
+    {"rotate_split", l_layout_dwindle_rotate_split},
+    {"splitratio",   l_layout_dwindle_splitratio  },
+    {"move_to_root", l_layout_dwindle_move_to_root},
+    {nullptr,        nullptr                      },
+};
+
+const luaL_Reg kLayoutFuncs[] = {
+    {"set",        l_layout_set       },
+    {"inc_master", l_layout_inc_master},
+    {nullptr,      nullptr            },
+};
+
+const luaL_Reg kVisualFuncs[] = {
+    {"set",   l_visual_set},
+    {"get",   l_visual_get},
+    {nullptr, nullptr     },
+};
+
+const luaL_Reg kBehaviorFuncs[] = {
+    {"set",   l_behavior_set},
+    {"get",   l_behavior_get},
+    {nullptr, nullptr       },
+};
+
 const luaL_Reg kuwuwmFuncs[] = {
-    {"spawn",                l_spawn               },
-    {"bind",                 l_bind                },
-    {"set",                  l_set                 },
-    {"get",                  l_get                 },
-    {"quit",                 l_quit                },
-    {"reload",               l_reload              },
-    {"hook",                 l_hook                },
-    {"unhook",               l_unhook              },
-    {"rule",                 l_rule                },
-    {"kill",                 l_kill                },
-    {"focus_next",           l_focus_next          },
-    {"focus_prev",           l_focus_prev          },
-    {"toggle_floating",      l_toggle_floating     },
-    {"toggle_fullscreen",    l_toggle_fullscreen   },
-    {"inc_master",           l_inc_master          },
-    {"focus_monitor",        l_focus_monitor       },
-    {"set_layout",           l_set_layout          },
-    {"dwindle_toggle_split", l_dwindle_toggle_split},
-    {"dwindle_swap_split",   l_dwindle_swap_split  },
-    {"dwindle_rotate_split", l_dwindle_rotate_split},
-    {"dwindle_splitratio",   l_dwindle_splitratio  },
-    {"dwindle_move_to_root", l_dwindle_move_to_root},
-    {nullptr,                nullptr               },
+    {"spawn",                l_spawn                          },
+    {"bind",                 l_bind                           },
+    {"set",                  l_set                            },
+    {"get",                  l_get                            },
+    {"quit",                 l_quit                           },
+    {"reload",               l_reload                         },
+    {"hook",                 l_hook                           },
+    {"unhook",               l_unhook                         },
+    {"rule",                 l_rule                           },
+    {"kill",                 l_kill                           },
+    {"focus_next",           l_focus_next                     },
+    {"focus_prev",           l_focus_prev                     },
+    {"toggle_floating",      l_toggle_floating                },
+    {"toggle_fullscreen",    l_toggle_fullscreen              },
+    {"inc_master",           l_deprecated_inc_master          },
+    {"focus_monitor",        l_focus_monitor                  },
+    {"set_layout",           l_deprecated_set_layout          },
+    {"dwindle_toggle_split", l_deprecated_dwindle_toggle_split},
+    {"dwindle_swap_split",   l_deprecated_dwindle_swap_split  },
+    {"dwindle_rotate_split", l_deprecated_dwindle_rotate_split},
+    {"dwindle_splitratio",   l_deprecated_dwindle_splitratio  },
+    {"dwindle_move_to_root", l_deprecated_dwindle_move_to_root},
+    {nullptr,                nullptr                          },
 };
 
 // Embedded fallback, used only if no rc.lua is found on disk. Mirrors the
@@ -2119,6 +2320,34 @@ void LuaConfig::init(Server& server) {
     lua_newtable(L);
     luaL_setfuncs(L, kClientFuncs, 0);
     lua_setfield(L, -2, "client");
+
+    // uwu.layout.{set,inc_master,dwindle.*} -- tiling primitives, split out
+    // of the flat kuwuwmFuncs table they used to share with spawn/bind/quit.
+    // paw.layout (lib/paw/init.lua) wraps exactly this subtable now, the
+    // same "sugar over a raw uwu.* namespace" relationship uwu.monitor/
+    // uwu.tag/uwu.input already have with their own callers. See the
+    // kDwindleFuncs/kLayoutFuncs comment above l_layout_set for the reasoning.
+    lua_newtable(L);
+    luaL_setfuncs(L, kLayoutFuncs, 0);
+    lua_newtable(L);
+    luaL_setfuncs(L, kDwindleFuncs, 0);
+    lua_setfield(L, -2, "dwindle");
+    lua_setfield(L, -2, "layout");
+
+    // uwu.visual.{set,get} / uwu.behavior.{set,get} -- the category-enforced
+    // successors to the flat uwu.set()/uwu.get() (still registered above as
+    // deprecated aliases). nyaa calls uwu.visual.*; paw calls uwu.behavior.*;
+    // neither can reach the other's fields even by accident, because the
+    // category check lives in dispatchSet/dispatchGet against
+    // kSettingCategory, not in either caller. See the kSettingCategory
+    // comment near the top of this file for what this replaces.
+    lua_newtable(L);
+    luaL_setfuncs(L, kVisualFuncs, 0);
+    lua_setfield(L, -2, "visual");
+
+    lua_newtable(L);
+    luaL_setfuncs(L, kBehaviorFuncs, 0);
+    lua_setfield(L, -2, "behavior");
 
     // uwu.system.{brightness,volume} -- OS/session state, not compositor
     // state, hence its own top-level namespace rather than living flat

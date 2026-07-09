@@ -1,19 +1,27 @@
 -- nyaa -- uwuwm's theming module. Appearance only.
 --
--- uwu.set(name, value) covers thirteen settings total (see
--- kSettingSetters in lua_config.cpp), and they split cleanly into two
--- kinds: seven are how things *look* (gap, border_width,
--- border_color_active, border_color_inactive, background_color,
--- cursor_size, inactive_opacity), and six are *behavior*
--- (master_factor -- a tiling ratio, repeat_rate/repeat_delay -- keyboard
--- timing, terminal/launcher -- app-launch preferences,
--- dwindle_preserve_split). nyaa only ever calls uwu.set()/uwu.get() for
--- the first seven. The other six are paw.defaults()'s job (see
--- lib/paw/init.lua) -- deliberately, so the two modules partition
--- uwu.set()'s field space instead of both being able to reach the same
--- setting. nyaa.wear() rejects the other six by name (pointing at
--- paw.defaults() instead) rather than quietly forwarding them, so that
--- boundary can't drift back open by accident.
+-- uwu.visual.set(name, value)/uwu.visual.get(name) cover seven settings --
+-- how things *look* (gap, border_width, border_color_active,
+-- border_color_inactive, background_color, cursor_size, inactive_opacity).
+-- Six more exist (master_factor, repeat_rate/repeat_delay, terminal/
+-- launcher, dwindle_preserve_split) but those are *behavior*, and
+-- uwu.visual.set/get refuse them outright at the C level (see
+-- kSettingCategory in src/lua_config.cpp) -- not just "nyaa happens not to
+-- call them for those." paw.defaults() (lib/paw/init.lua) is the module
+-- that owns them, through the mirror-image uwu.behavior.set/get, which in
+-- turn refuse every field in VISUAL_FIELDS below. Two separate namespaces
+-- now, not two callers sharing one and promising not to collide.
+--
+-- nyaa.wear() still keeps its own copy of VISUAL_FIELDS/PAW_OWNED_FIELDS
+-- below -- not for enforcement (uwu.visual.set already can't reach a
+-- behavior field even if this table were wrong) but so a bad key gets a
+-- readable Lua error ("use paw.defaults() instead") rather than a bare
+-- C-side log line about an unknown setting.
+--
+-- nyaa.rule() is the one addition outside that: it's per-*client* border
+-- theming (uwu.rule()'s apply.border_color_active/inactive), not a
+-- uwu.visual field at all, so it doesn't participate in the
+-- VISUAL_FIELDS/PAW_OWNED_FIELDS partition above.
 --
 -- nyaa.rule() is the one addition outside that: it's per-*client* border
 -- theming (uwu.rule()'s apply.border_color_active/inactive), not a
@@ -238,7 +246,7 @@ function nyaa.wear(theme)
 
   for name in pairs(VISUAL_FIELDS) do
     if merged[name] ~= nil then
-      uwu.set(name, merged[name])
+      uwu.visual.set(name, merged[name])
     end
   end
 
@@ -249,13 +257,13 @@ function nyaa.wear(theme)
   return merged
 end
 
--- nyaa.worn() -- reads the seven visual settings back out of uwu.get(),
--- as one table. Handy for a status-bar module, or just `print`ing to
--- sanity-check what actually landed after nyaa.wear().
+-- nyaa.worn() -- reads the seven visual settings back out of
+-- uwu.visual.get(), as one table. Handy for a status-bar module, or just
+-- `print`ing to sanity-check what actually landed after nyaa.wear().
 function nyaa.worn()
   local current = {}
   for name in pairs(VISUAL_FIELDS) do
-    current[name] = uwu.get(name)
+    current[name] = uwu.visual.get(name)
   end
   return current
 end

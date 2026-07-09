@@ -10,17 +10,19 @@
 -- same way AwesomeWM splits core/awful/beautiful/wibox:
 --
 --   uwu   the raw compositor API (uwu.spawn, uwu.bind, uwu.hook,
---         uwu.rule, uwu.system.*, ... -- documented in full below, in
---         lib/meta/uwu.lua, and in MISSING.md)
---   paw   window-management sugar over `uwu` for the handful of things
---         that need it (keybind lists w/ descriptions, client rules,
---         short-named hooks) -- not a blanket re-export of uwu.* anymore;
---         call uwu.monitor/uwu.input/uwu.system/uwu.set_layout/etc
---         directly, same as this file does below
+--         uwu.rule, uwu.system.*, uwu.monitor.*, uwu.input.*, ... --
+--         documented in full below, in lib/meta/uwu.lua, and in
+--         MISSING.md). uwu.layout.*/uwu.visual.*/uwu.behavior.* are the
+--         primitive namespaces paw/nyaa wrap below -- reach for them
+--         directly only when paw/nyaa genuinely don't cover something.
+--   paw   window-management sugar over `uwu` -- keybind lists w/
+--         descriptions, client rules, short-named hooks, and (paw.layout/
+--         paw.client) the tiling and focus-navigation actions your
+--         keybinds actually call
 --   nyaa  aesthetics only -- two-color presets (nyaa.presets) or full
 --         26-role palettes (nyaa.palettes/nyaa.palette(), Catppuccin's
---         four flavors plus a few others), applied via uwu.set() /
---         per-client via uwu.rule(), plus nyaa.export.* to render the
+--         four flavors plus a few others), applied via nyaa.wear() /
+--         per-client via nyaa.rule(), plus nyaa.export.* to render the
 --         same palette into config snippets for the rest of your DE
 --         (GTK, kitty, foot, waybar, dunst)
 --
@@ -33,8 +35,10 @@
 local paw = require('paw')
 local nyaa = require('nyaa')
 
+paw.layout.set('dwindle')
+
 -- ── Theme ────────────────────────────────────────────────────────────
--- nyaa.wear() only ever touches the seven *visual* uwu.set() fields
+-- nyaa.wear() only ever touches the seven *visual* uwu.visual.* fields
 -- (gap, border_width, border_color_active/inactive, background_color,
 -- cursor_size, inactive_opacity) -- it'll refuse master_factor/
 -- repeat_rate/repeat_delay/terminal/launcher/dwindle_preserve_split below
@@ -122,16 +126,16 @@ local keys = {
   },
   { { 'mod', 'shift' }, 'q', uwu.quit, 'quit uwuwm' },
   { { 'mod', 'shift' }, 'r', uwu.reload, 'reload config' },
-  { mod, 'j', uwu.focus_next, 'focus next window' },
-  { mod, 'k', uwu.focus_prev, 'focus previous window' },
-  { { 'mod', 'shift' }, 'c', uwu.kill, 'close focused window' },
-  { mod, 'space', uwu.toggle_floating, 'toggle floating' },
-  { mod, 'f', uwu.toggle_fullscreen, 'toggle fullscreen' },
+  { mod, 'j', paw.client.focus_next, 'focus next window' },
+  { mod, 'k', paw.client.focus_prev, 'focus previous window' },
+  { { 'mod', 'shift' }, 'c', paw.client.kill, 'close focused window' },
+  { mod, 'space', paw.client.toggle_floating, 'toggle floating' },
+  { mod, 'f', paw.client.toggle_fullscreen, 'toggle fullscreen' },
   {
     mod,
     'i',
     function()
-      uwu.inc_master(0.05)
+      paw.layout.inc_master(0.05)
     end,
     'grow master area',
   },
@@ -139,7 +143,7 @@ local keys = {
     mod,
     'u',
     function()
-      uwu.inc_master(-0.05)
+      paw.layout.inc_master(-0.05)
     end,
     'shrink master area',
   },
@@ -222,26 +226,26 @@ local keys = {
   },
 
   -- dwindle: bound whether or not this output is currently in dwindle
-  -- mode (uwu.set_layout("dwindle")/("master") switches per-output --
-  -- see uwu.set_layout's own comment for why it's per-output, not
-  -- global). These are no-ops on a master-stack output.
+  -- mode (paw.layout.set("dwindle")/("master") switches per-output --
+  -- see uwu.layout.set's own comment in lua_config.cpp for why it's
+  -- per-output, not global). These are no-ops on a master-stack output.
   {
     { 'mod', 'shift' },
     'space',
-    uwu.dwindle_toggle_split,
+    paw.layout.dwindle.toggle_split,
     'toggle dwindle split orientation',
   },
   {
     { 'mod', 'shift' },
     'j',
-    uwu.dwindle_swap_split,
+    paw.layout.dwindle.swap_split,
     'swap dwindle split',
   },
   {
     mod,
     'r',
     function()
-      uwu.dwindle_rotate_split(90)
+      paw.layout.dwindle.rotate_split(90)
     end,
     'rotate dwindle split 90°',
   },
@@ -364,7 +368,7 @@ local focus_steam_id = paw.on('focuses', function(c)
   end
 end)
 
--- paw.off(focus_steam_id) -- to remove the hook above later.
+paw.off(focus_steam_id) -- to remove the hook above later.
 
 -- ── Querying current state ─────────────────────────────────────────────
 -- uwu.client.list() and uwu.client.focused() round out the read side --

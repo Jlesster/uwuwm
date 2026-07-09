@@ -81,11 +81,24 @@ struct View {
         nullptr;  // surface content, offset by border
                   // thickness. For XdgToplevel this is
                   // the tree wlr_scene_xdg_surface_create
-                  // returns directly; for XWaylandView
-                  // it's a plain tree we create so the
-                  // field type matches, with the actual
-                  // surface content nested one level
-                  // inside via wlr_scene_surface_create.
+                  // returns directly (a real subsurface
+                  // tree via the xdg_shell.c-internal
+                  // wlr_scene_subsurface_tree_create);
+                  // for XWaylandView this is the
+                  // wlr_scene_subsurface_tree_create tree
+                  // created in handleAssociate, with the
+                  // actual scene_surface nested one level
+                  // inside it. Both backends must give us
+                  // a real subsurface tree here -- that's
+                  // what makes the
+                  // wlr_scene_subsurface_tree_set_clip
+                  // call in applyBoxToScene actually
+                  // apply (it asserts-and-silently-no-ops
+                  // on plain trees, see subsurface_tree.c
+                  // :328-369). Null between XWaylandView
+                  // construction and handleAssociate, then
+                  // non-null for the lifetime of the
+                  // wl_surface.
     wlr_scene_rect* border_rects[4] = {};  // top, bottom, left, right
 
     // Correction for the client's xdg_surface window-geometry x/y offset
@@ -285,35 +298,55 @@ protected:
     // intermediate, per-frame placement during a tween).
     void applyBoxToScene(const wlr_box& box);
 
-    // Backend-specific scene-buffer positioning hook, called from
-    // applyBoxToScene right after content_tree has been placed at (b, b)
-    // of scene_tree. Default no-op because XdgToplevel doesn't need it --
-    // its content_tree is a wlr_scene_xdg_surface_create tree whose inner
-    // surface_tree is auto-positioned by wlroots on every commit, so the
-    // visible chrome already lands at (b, b) once content_tree is at
-    // (b, b). XWaylandView overrides this to position its scene buffer
-    // (a plain wlr_scene_surface, no wlroots auto-shift) at
-    // (-content_offset_x, -content_offset_y) of content_tree, so the
-    // X window's visible chrome -- which starts at
-    // (content_offset_x, content_offset_y) in X-window-local coordinates
-    // -- also lands at (b, b). No-op if the buffer hasn't been created
-    // yet (pre-associate XWayland surface) or content_offset_x/y are 0
-    // (non-CSD X11 client).
+    // Backend-specific compensation for the difference between the
+    // scene-tree's content_tree origin and where the visible chrome
+    // actually lands, called from applyBoxToScene right after
+    // content_tree has been placed at (b, b) of scene_tree. Default
+    // no-op because XdgToplevel doesn't need it -- its content_tree is
+    // a wlr_scene_xdg_surface_create tree whose inner surface_tree is
+    // auto-positioned by wlroots at (-geometry.x, -geometry.y) of
+    // content_tree on every commit (subprojects/wlroots/types/scene/
+    // xdg_shell.c:33-47), so the visible chrome already lands at
+    // (b, b) once content_tree is at (b, b). XWaylandView overrides
+    // this to position content_tree itself at (b - content_offset_x,
+    // b - content_offset_y) of scene_tree: the wlroots subsurface
+    // tree (the X11 content_tree) auto-positions its inner
+    // scene_surface at (clip.x, clip.y) of itself once the clip is
+    // set (subsurface_tree.c:96), and contentClipBox sets that clip
+    // origin to (content_offset_x, content_offset_y) in wl_surface
+    // space -- so the auto-positioned buffer lands at
+    // (content_offset_x, content_offset_y) of content_tree. Sliding
+    // content_tree back by (content_offset_x, content_offset_y) makes
+    // the net result (b, b) of scene_tree. No-op if content_tree
+    // hasn't been created yet (pre-associate XWayland surface) or
+    // content_offset_x/y are both 0 (non-CSD X11 client).
     virtual void applyContentOffsetToScene(const wlr_box& /*box*/) {}
 
-    // The clip box for content_tree, in content_tree's own local
-    // coordinate space. `box` is whatever applyBoxToScene is currently
-    // placing this view at (the final geo, or an in-progress animation
-    // frame) -- XdgToplevel ignores it and clips to the client's
-    // declared xdg_surface window-geometry instead (see override), but
-    // XWaylandView has no equivalent client-declared geometry to clip
-    // to, so it clips to `box` itself. Either way this exists so a
-    // surface buffer that overshoots or lags behind what it was actually
-    // allocated -- CSD shadow margins, or a client (Gecko-based ones,
-    // namely Firefox/Zen, are particularly prone to this mid-resize)
-    // committing a differently-sized buffer than expected -- gets cut
-    // off at the chrome boundary instead of bleeding past the border.
-    // Width == 0 means "no clip".
+    // The clip box for content_tree, in the wl_surface coordinate
+    // space of the surface content_tree wraps. The default empty box
+    // (`{0}`) means "no clip"; both backends override. `box` is
+    // whatever applyBoxToScene is currently placing this view at
+    // (the final geo, or an in-progress animation frame). XdgToplevel
+    // uses the client's declared xdg_surface window-geometry
+    // (toplevel.cpp) so the visible chrome (geometry.{x,y,width,
+    // height}) is exactly what gets rendered; XWaylandView uses
+    // (content_offset_x, content_offset_y, box - 2b) so the CSD
+    // chrome region of the X window is exactly what gets rendered.
+    // This exists so a surface buffer that overshoots or lags behind
+    // what it was actually allocated -- CSD shadow margins, or a
+    // client (Gecko-based ones, namely Firefox/Zen, are particularly
+    // prone to this mid-resize) committing a differently-sized
+    // buffer than expected -- gets cropped at the chrome boundary
+    // instead of bleeding past the border. Width == 0 means "no
+    // clip".
+    //
+    // Implemented via wlr_scene_subsurface_tree_set_clip in
+    // applyBoxToScene, which requires content_tree to be a real
+    // subsurface tree (XdgToplevel: wlr_scene_xdg_surface_create
+    // nests one; XWaylandView: wlr_scene_subsurface_tree_create
+    // directly). On a plain wlr_scene_tree the API is a silent
+    // no-op in release builds (subsurface_tree.c:328-369), which
+    // is exactly the bug this code is structured to avoid.
     virtual wlr_box contentClipBox(const wlr_box& /*box*/) const {
         return wlr_box{};
     }

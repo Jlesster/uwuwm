@@ -57,20 +57,23 @@ struct XWaylandView : public View {
     int frame_bottom = 0;
 
 private:
-    // The wlr_scene_surface attached under content_tree by
-    // handleAssociate. Null until associate fires (an XWaylandView is
-    // constructed in the X server's "window exists but not yet bound to
-    // a wl_surface" window, and the scene-surface can't be created
-    // before then). applyContentOffsetToScene reads it to shift the
-    // buffer so the X window's visible chrome lands at (b, b) of
-    // scene_tree; the regular scene-graph teardown path doesn't need
-    // to know about it (the scene-surface self-destroys when
-    // xsurface->surface does, same as in the current code -- see
-    // handleAssociate / handleDissociate).
-    wlr_scene_surface* scene_surface = nullptr;
+    // content_tree is created in handleAssociate, not the constructor,
+    // because wlr_scene_subsurface_tree_create needs a real wl_surface*
+    // (the XWaylandView constructor runs in the X server's "window
+    // exists but not yet bound to a wl_surface" window). The base
+    // View::content_tree field stays null between construction and
+    // associate, which is harmless -- nothing visualizes before
+    // associate anyway, and View::applyBoxToScene guards the
+    // content-tree operations on it being non-null. The tree
+    // self-destructs when xsurface->surface does (wlroots hooks
+    // surface_destroy in wlr_scene_subsurface_tree_create) -- see
+    // handleDissociate.
+
+    wlr_scene_tree* scene_surface = nullptr;
 
     void handleAssociate();
     void handleDissociate();
+    void handleSurfaceCommit();
     void handleMap();
     void handleUnmap();
     void handleDestroy();
@@ -83,6 +86,7 @@ private:
 
     VoidListener                                   associate;
     VoidListener                                   dissociate;
+    VoidListener                                   surface_commit;
     VoidListener                                   map_listener;
     VoidListener                                   unmap;
     VoidListener                                   destroy;

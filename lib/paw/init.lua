@@ -2,27 +2,27 @@
 -- for the full primitive-level reference; paw never does anything a
 -- couple of lines of raw uwu.* calls couldn't, it just gives the common
 -- shapes -- a list of keybinds, a client rule, a short-named hook, the
--- five behavior/app settings -- names and call shapes of their own
--- instead of copying awful's).
+-- tiling primitives, the behavior/app settings -- names and call shapes
+-- of their own instead of copying awful's).
 
 local paw = {}
 
 -- ── behavior / app defaults ──────────────────────────────────────────────
--- uwu.set(name, value) covers thirteen settings total (see
--- kSettingSetters in lua_config.cpp): seven are visual (nyaa.wear()'s job
--- -- gap, border_width, border_color_active, border_color_inactive,
--- background_color, cursor_size, inactive_opacity) and six are
--- behavior/app preferences, which paw.defaults() owns instead:
--- master_factor (initial tiling ratio -- paw.layout.inc_master only ever
--- nudges it by a delta, this sets the absolute starting value),
--- repeat_rate/repeat_delay (keyboard timing), terminal/launcher (the two
--- app strings your own keybinds will want to reference), and
+-- uwu.behavior.set(name, value)/uwu.behavior.get(name) cover seven
+-- settings -- app/behavior preferences, not appearance: master_factor
+-- (initial tiling ratio -- paw.layout.inc_master only ever nudges it by a
+-- delta, this sets the absolute starting value), repeat_rate/repeat_delay
+-- (keyboard timing), terminal/launcher (the two app strings your own
+-- keybinds will want to reference), focus_follows_mouse, and
 -- dwindle_preserve_split (see dwindle.hpp -- whether a split's
 -- orientation survives a resize instead of being recomputed from the
--- box's aspect ratio every arrange). Same partition as nyaa.wear(),
--- mirrored: paw.defaults() rejects nyaa's seven fields by name instead of
--- quietly forwarding them, so the boundary between the two can't drift
--- back open by accident.
+-- box's aspect ratio every arrange). nyaa's seven visual fields
+-- (gap, border_width, ...) live on the mirror-image uwu.visual.set/get
+-- instead -- see nyaa's header comment. uwu.behavior.set already can't
+-- reach any of nyaa's fields at the C level (see kSettingCategory in
+-- src/lua_config.cpp), so BEHAVIOR_FIELDS/NYAA_OWNED_FIELDS below exist
+-- only to turn a misrouted call into a readable Lua error instead of a
+-- bare C-side log line.
 local BEHAVIOR_FIELDS = {
   master_factor = true,
   repeat_rate = true,
@@ -45,9 +45,9 @@ local NYAA_OWNED_FIELDS = {
 
 -- paw.defaults({ terminal = "wezterm", launcher = "fuzzel", master_factor = 0.55 })
 --
--- Pushes each field straight through uwu.set(), and hands the table back
--- so callers can do e.g. `local terminal = paw.defaults({...}).terminal`
--- without a second lookup.
+-- Pushes each field straight through uwu.behavior.set(), and hands the
+-- table back so callers can do e.g.
+-- `local terminal = paw.defaults({...}).terminal` without a second lookup.
 function paw.defaults(opts)
   opts = opts or {}
 
@@ -62,11 +62,84 @@ function paw.defaults(opts)
     if not BEHAVIOR_FIELDS[k] then
       error("paw.defaults: '" .. tostring(k) .. "' isn't a real uwuwm setting")
     end
-    uwu.set(k, v)
+    uwu.behavior.set(k, v)
   end
 
   return opts
 end
+
+-- ── layout / tiling ───────────────────────────────────────────────────────
+-- paw.layout -- AwesomeWM's `awful.layout` module is the parity target
+-- here: this is the layer that actually calls uwu.layout.* (see
+-- src/lua_config.cpp), the same relationship awful.layout has to the
+-- core client/tag objects it arranges. Every function here used to be
+-- called as a bare uwu.set_layout()/uwu.inc_master()/uwu.dwindle_*() --
+-- raw primitive calls sitting directly in rc.lua with no paw layer
+-- between them and a keybind, despite this module's own comments always
+-- having assumed paw.layout existed. It didn't; this is that module,
+-- finally, wrapping uwu.layout.* (nested uwu.layout.dwindle.* for the
+-- dwindle-specific actions) instead of the deprecated flat aliases.
+paw.layout = {
+  -- paw.layout.set("dwindle" | "master") -- per current output, same as
+  -- uwu.layout.set's own semantics (see its comment in lua_config.cpp
+  -- for why it's per-output rather than global).
+  set = function(name)
+    return uwu.layout.set(name)
+  end,
+
+  -- paw.layout.inc_master(delta) -- nudges master_factor by `delta`;
+  -- paw.defaults({ master_factor = ... }) sets the absolute starting
+  -- value this nudges away from.
+  inc_master = function(delta)
+    return uwu.layout.inc_master(delta)
+  end,
+
+  dwindle = {
+    toggle_split = function()
+      return uwu.layout.dwindle.toggle_split()
+    end,
+    swap_split = function()
+      return uwu.layout.dwindle.swap_split()
+    end,
+    rotate_split = function(degrees)
+      return uwu.layout.dwindle.rotate_split(degrees)
+    end,
+    splitratio = function(ratio)
+      return uwu.layout.dwindle.splitratio(ratio)
+    end,
+    -- move_to_root(stable) -- `stable` defaults to true, matching
+    -- uwu.layout.dwindle.move_to_root's own default.
+    move_to_root = function(stable)
+      return uwu.layout.dwindle.move_to_root(stable)
+    end,
+  },
+}
+
+-- ── client actions ───────────────────────────────────────────────────────
+-- paw.client -- AwesomeWM parity target: `awful.client` (focus-by-index,
+-- floating/fullscreen toggles). uwuwm's client *lifecycle* (list/focused/
+-- kill) stays on uwu.client -- those are core-object accessors, the same
+-- role client.focus/client.get() play in awesomewm itself. What moves
+-- here is client *workflow*: which client focus lands on next depends on
+-- tiling order, exactly the kind of layout-aware navigation awful.client
+-- wraps rather than the core `client` object exposing directly.
+paw.client = {
+  focus_next = function()
+    return uwu.focus_next()
+  end,
+  focus_prev = function()
+    return uwu.focus_prev()
+  end,
+  toggle_floating = function()
+    return uwu.toggle_floating()
+  end,
+  toggle_fullscreen = function()
+    return uwu.toggle_fullscreen()
+  end,
+  kill = function()
+    return uwu.kill()
+  end,
+}
 
 -- ── keybinds ─────────────────────────────────────────────────────────────
 -- paw.keys({
