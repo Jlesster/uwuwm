@@ -45,16 +45,13 @@ struct XWaylandView : public View {
     void         setFullscreenBackend(bool fullscreen) override;
     wlr_surface* wlrSurface() const override { return xsurface->surface; }
     wlr_box      contentClipBox(const wlr_box& box) const override;
-    void         applyContentOffsetToScene(const wlr_box& box) override;
 
-    // _GTK_FRAME_EXTENTS right/bottom components (left/top reuse the
-    // base View's content_offset_x/y -- see xwayland_view.cpp's
-    // fetchGtkFrameExtents and handleMap for where these get set, and
-    // configureBackend/contentClipBox for where they're consumed). 0 for
-    // any client that doesn't set the property, which keeps this a no-op
-    // for non-GTK / non-CSD X11 clients.
-    int frame_right  = 0;
-    int frame_bottom = 0;
+    // content_offset_x/y and frame_right/frame_bottom were removed along
+    // with the _GTK_FRAME_EXTENTS fetching machinery: most X11 GTK/Gecko
+    // builds (Firefox, Zen, Chrome via XWayland) run SSD by default, so
+    // the property is typically 0 anyway, and the elaborate sliding math
+    // it required added fragile complexity that introduced the residual
+    // rendering bugs the simpler dwl-style hard clip replaces.
 
 private:
     // content_tree is created in handleAssociate, not the constructor,
@@ -68,8 +65,6 @@ private:
     // self-destructs when xsurface->surface does (wlroots hooks
     // surface_destroy in wlr_scene_subsurface_tree_create) -- see
     // handleDissociate.
-
-    wlr_scene_tree* scene_surface = nullptr;
 
     void handleAssociate();
     void handleDissociate();

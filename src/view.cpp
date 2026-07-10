@@ -60,16 +60,12 @@ void View::applyBoxToScene(const wlr_box& box) {
     // subsurface_tree_create child; the latter via a direct
     // wlr_scene_subsurface_tree_create in handleAssociate), so the
     // wlr_scene_subsurface_tree_set_clip call below (and the matching
-    // auto-positioning of the inner scene_surface's buffer that the
-    // clip drives) is the same on both paths. The per-backend
-    // compensating shift lives in the XWaylandView override of
-    // applyContentOffsetToScene (xwayland_view.cpp) -- for XDG,
-    // xdg_shell.c auto-positions the inner surface_tree at
-    // (-geometry.x, -geometry.y) of content_tree on every commit, so the
-    // visible chrome lands at (b, b) without further work from us here;
-    // for XWayland, the offset into the X window is the CSD shadow
-    // (content_offset_x/y), and XWaylandView slides content_tree back by
-    // that amount so the auto-positioned buffer lands at (b, b) too.
+    // auto-positioning of the inner buffer that the clip drives) is the
+    // same on both paths. The visible chrome lands at (b, b) on both
+    // backends: xdg_shell.c auto-positions the inner surface_tree at
+    // (-geometry.x, -geometry.y) of content_tree on every commit, and
+    // the XWayland clip is at (0, 0) of the X window (its content_tree
+    // is the subsurface tree itself, no separate inner shift needed).
     //
     // XdgToplevel's content_tree is set in the constructor; XWaylandView
     // creates it in handleAssociate (deferred, because the subsurface
@@ -82,7 +78,6 @@ void View::applyBoxToScene(const wlr_box& box) {
     // than deref null; the border still gets placed correctly.
     if(content_tree) {
         wlr_scene_node_set_position(&content_tree->node, b, b);
-        applyContentOffsetToScene(box);
 
         wlr_box  clip_box = contentClipBox(box);
         wlr_box* clip =

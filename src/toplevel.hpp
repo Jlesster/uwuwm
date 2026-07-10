@@ -30,9 +30,7 @@ struct XdgToplevel : public View {
     wlr_surface* wlrSurface() const override {
         return xdg_toplevel->base->surface;
     }
-    wlr_box contentClipBox(const wlr_box& /*box*/) const override {
-        return xdg_toplevel->base->geometry;
-    }
+    wlr_box contentClipBox(const wlr_box& box) const override;
 
 private:
     void handleMap();

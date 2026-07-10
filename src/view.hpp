@@ -298,30 +298,6 @@ protected:
     // intermediate, per-frame placement during a tween).
     void applyBoxToScene(const wlr_box& box);
 
-    // Backend-specific compensation for the difference between the
-    // scene-tree's content_tree origin and where the visible chrome
-    // actually lands, called from applyBoxToScene right after
-    // content_tree has been placed at (b, b) of scene_tree. Default
-    // no-op because XdgToplevel doesn't need it -- its content_tree is
-    // a wlr_scene_xdg_surface_create tree whose inner surface_tree is
-    // auto-positioned by wlroots at (-geometry.x, -geometry.y) of
-    // content_tree on every commit (subprojects/wlroots/types/scene/
-    // xdg_shell.c:33-47), so the visible chrome already lands at
-    // (b, b) once content_tree is at (b, b). XWaylandView overrides
-    // this to position content_tree itself at (b - content_offset_x,
-    // b - content_offset_y) of scene_tree: the wlroots subsurface
-    // tree (the X11 content_tree) auto-positions its inner
-    // scene_surface at (clip.x, clip.y) of itself once the clip is
-    // set (subsurface_tree.c:96), and contentClipBox sets that clip
-    // origin to (content_offset_x, content_offset_y) in wl_surface
-    // space -- so the auto-positioned buffer lands at
-    // (content_offset_x, content_offset_y) of content_tree. Sliding
-    // content_tree back by (content_offset_x, content_offset_y) makes
-    // the net result (b, b) of scene_tree. No-op if content_tree
-    // hasn't been created yet (pre-associate XWayland surface) or
-    // content_offset_x/y are both 0 (non-CSD X11 client).
-    virtual void applyContentOffsetToScene(const wlr_box& /*box*/) {}
-
     // The clip box for content_tree, in the wl_surface coordinate
     // space of the surface content_tree wraps. The default empty box
     // (`{0}`) means "no clip"; both backends override. `box` is
@@ -330,15 +306,14 @@ protected:
     // uses the client's declared xdg_surface window-geometry
     // (toplevel.cpp) so the visible chrome (geometry.{x,y,width,
     // height}) is exactly what gets rendered; XWaylandView uses
-    // (content_offset_x, content_offset_y, box - 2b) so the CSD
-    // chrome region of the X window is exactly what gets rendered.
-    // This exists so a surface buffer that overshoots or lags behind
-    // what it was actually allocated -- CSD shadow margins, or a
-    // client (Gecko-based ones, namely Firefox/Zen, are particularly
-    // prone to this mid-resize) committing a differently-sized
-    // buffer than expected -- gets cropped at the chrome boundary
-    // instead of bleeding past the border. Width == 0 means "no
-    // clip".
+    // (0, 0, box - 2b) so the X window's local content area is exactly
+    // what gets rendered -- same hard-clip approach dwl uses. This
+    // exists so a surface buffer that overshoots or lags behind what
+    // it was actually allocated -- a client (Gecko-based ones, namely
+    // Firefox/Zen, are particularly prone to this mid-resize) committing
+    // a differently-sized buffer than expected -- gets cropped at the
+    // chrome boundary instead of bleeding past the border. Width == 0
+    // means "no clip".
     //
     // Implemented via wlr_scene_subsurface_tree_set_clip in
     // applyBoxToScene, which requires content_tree to be a real

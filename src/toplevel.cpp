@@ -243,6 +243,41 @@ void XdgToplevel::activateBackend(bool activated) {
     wlr_xdg_toplevel_set_activated(xdg_toplevel, activated);
 }
 
+// The clip's width/height are in surface coordinates and end up
+// determining the buffer's drawn size in scene space
+// (subprojects/wlroots/types/scene/surface.c:130-131 +
+// wlr_scene_buffer_set_dest_size) -- not just the source-box crop. If
+// we return the raw xdg_toplevel->base->geometry, a client that
+// allocated a buffer larger than what we asked for via
+// wlr_xdg_toplevel_set_size (Firefox/Zen are the routine offenders:
+// they pick a buffer scale that ends up larger than the suggested
+// size, and the suggested size is itself only a hint per xdg-shell)
+// ends up drawing that oversized buffer in scene space, bleeding far
+// past the tile's actual content area. Same problem at a smaller
+// magnitude when geometry is the wlroots-reported-zero fallback:
+// View::applyBoxToScene sees clip.width == 0, passes nullptr, and
+// disables clipping entirely. Gecko-based clients hit BOTH of
+// these in sequence -- they're slow to call set_window_geometry at
+// all (the zero case), and even after they do, the geometry they
+// declare can be larger than the tile because their buffer scale
+// isn't 1:1 with the suggested size. Mirror
+// XWaylandView::contentClipBox's pattern: use the client's declared
+// geometry.x/y (the CSD-shadow offset) as the clip origin -- the
+// xdg_shell.c auto-shift of the inner surface_tree by
+// (-geometry.x, -geometry.y) plus the buffer's auto-position at
+// (clip.x, clip.y) of that inner tree makes the visible chrome land
+// at content_tree's (0, 0) -- but pin the clip's width/height to
+// the tile's own content area (border-inset box) regardless of how
+// large the surface buffer actually is. The `w > 0` clamp is
+// XWaylandView's, kept for the degenerate tile case.
+wlr_box XdgToplevel::contentClipBox(const wlr_box& box) const {
+    const wlr_box& g = xdg_toplevel->base->geometry;
+    int b = server.lua_cfg.settings.border_px;
+    int w = box.width  - 2 * b;
+    int h = box.height - 2 * b;
+    return wlr_box{g.x, g.y, w > 0 ? w : 0, h > 0 ? h : 0};
+}
+
 void XdgToplevel::closeBackend() { wlr_xdg_toplevel_send_close(xdg_toplevel); }
 
 void XdgToplevel::setFullscreenBackend(bool fullscreen) {
