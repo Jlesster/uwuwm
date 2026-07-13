@@ -242,31 +242,41 @@ void XdgToplevel::handleCommit(wlr_surface* /*surface*/) {
     int out_scale =
         output ? static_cast<int>(output->wlr_output->scale * 100) : -1;
 
-    wlr_log(WLR_DEBUG,
-            "[uwuwm xdg] commit title='%s' geo(tile)=%dx%d client_geo=%d,%d "
-            "%dx%d surface_current=%dx%d raw_buffer=%dx%d surface_scale=%d "
-            "output_scale=%d%% prev_recorded=%d,%d %dx%d",
-            title.c_str(),
-            geo.width,
-            geo.height,
-            client_geo.x,
-            client_geo.y,
-            client_geo.width,
-            client_geo.height,
-            surf_w,
-            surf_h,
-            buf_w,
-            buf_h,
-            surf_scale,
-            out_scale,
-            content_offset_x,
-            content_offset_y,
-            content_clip_w,
-            content_clip_h);
+    bool geo_changed = client_geo.x != content_offset_x ||
+                       client_geo.y != content_offset_y ||
+                       client_geo.width != content_clip_w ||
+                       client_geo.height != content_clip_h;
 
-    if(client_geo.x != content_offset_x || client_geo.y != content_offset_y ||
-       client_geo.width != content_clip_w ||
-       client_geo.height != content_clip_h) {
+    // Only worth a log line when something actually changed -- this used
+    // to fire unconditionally on every commit, for every toplevel
+    // (kitty, wezterm, everything), which was pure overhead once the
+    // investigation that needed it was done. The mismatch/re-assert path
+    // below still logs unconditionally when it fires, since that's rare
+    // and always worth seeing.
+    if(geo_changed) {
+        wlr_log(WLR_DEBUG,
+                "[uwuwm xdg] commit title='%s' geo(tile)=%dx%d "
+                "client_geo=%d,%d %dx%d surface_current=%dx%d "
+                "raw_buffer=%dx%d surface_scale=%d output_scale=%d%% "
+                "prev_recorded=%d,%d %dx%d",
+                title.c_str(),
+                geo.width,
+                geo.height,
+                client_geo.x,
+                client_geo.y,
+                client_geo.width,
+                client_geo.height,
+                surf_w,
+                surf_h,
+                buf_w,
+                buf_h,
+                surf_scale,
+                out_scale,
+                content_offset_x,
+                content_offset_y,
+                content_clip_w,
+                content_clip_h);
+
         content_offset_x = client_geo.x;
         content_offset_y = client_geo.y;
         content_clip_w   = client_geo.width;
