@@ -535,6 +535,8 @@ void XWaylandView::handleRequestFullscreen() {
 void XWaylandView::handleSetTitle() {
     title = xsurface->title ? xsurface->title : "";
     syncForeignToplevelMeta();
+    // See XdgToplevel::handleSetTitle for why this fires unconditionally.
+    server.lua_cfg.fireClientEvent("client::title_changed", this);
 }
 
 void XWaylandView::handleSetClass() {

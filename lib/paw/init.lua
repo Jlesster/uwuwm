@@ -77,8 +77,9 @@ end
 -- raw primitive calls sitting directly in rc.lua with no paw layer
 -- between them and a keybind, despite this module's own comments always
 -- having assumed paw.layout existed. It didn't; this is that module,
--- finally, wrapping uwu.layout.* (nested uwu.layout.dwindle.* for the
--- dwindle-specific actions) instead of the deprecated flat aliases.
+-- wrapping uwu.layout.* (nested uwu.layout.dwindle.* for the
+-- dwindle-specific actions). The old flat aliases are gone entirely now
+-- (not just deprecated) -- uwu.layout.*/paw.layout.* is the only path in.
 paw.layout = {
   -- paw.layout.set("dwindle" | "master") -- per current output, same as
   -- uwu.layout.set's own semantics (see its comment in lua_config.cpp
@@ -139,6 +140,32 @@ paw.client = {
   kill = function()
     return uwu.kill()
   end,
+
+  -- paw.client.move(dx, dy) / paw.client.resize(dw, dh) -- relative nudges
+  -- on the *focused* client, over the raw c:move(x, y)/c:resize(w, h)
+  -- (which take absolute coordinates and only work on a floating client --
+  -- see their comment in lua_config.cpp). This is the Hyprland-bind-style
+  -- shape (dwindlesize/movewindow taking a delta, not a target rect) --
+  -- e.g. `uwu.bind({"mod"}, "l", function() paw.client.move(20, 0) end)`.
+  -- No-op (not an error) with no focused client, since a keybind calling
+  -- this doesn't know in advance whether one exists; a focused-but-tiled
+  -- client still errors, same as the raw method, since silently ignoring
+  -- that would hide a genuinely wrong keybind (probably meant to float
+  -- first) instead of surfacing it.
+  move = function(dx, dy)
+    local c = uwu.client.focused()
+    if not c then
+      return
+    end
+    c:move(c.geo.x + dx, c.geo.y + dy)
+  end,
+  resize = function(dw, dh)
+    local c = uwu.client.focused()
+    if not c then
+      return
+    end
+    c:resize(c.geo.width + dw, c.geo.height + dh)
+  end,
 }
 
 -- ── keybinds ─────────────────────────────────────────────────────────────
@@ -188,6 +215,27 @@ function paw.tags(fn)
     fn(i)
   end
 end
+
+-- ── monitors ─────────────────────────────────────────────────────────────
+-- paw.monitor -- workflow-shaped sugar over uwu.monitor.* the same way
+-- paw.client wraps uwu.client.*: uwu.monitor.set()/list() stay the
+-- primitive-level API (configuring an output, reading every output's
+-- state), what's missing at that level is "just tell me which one" and
+-- "run this for each" -- the two shapes an rc.lua actually reaches for
+-- when it's reacting to monitor state rather than configuring it.
+paw.monitor = {
+  focused = function()
+    return uwu.monitor.focused()
+  end,
+
+  -- paw.monitor.each(function(m) ... end) -- m is one uwu.MonitorInfo
+  -- table per currently connected output (see uwu.monitor.list()).
+  each = function(fn)
+    for _, m in ipairs(uwu.monitor.list()) do
+      fn(m)
+    end
+  end,
+}
 
 -- ── client rules ─────────────────────────────────────────────────────────
 -- paw.rule({
@@ -243,6 +291,7 @@ local EVENT_ALIASES = {
   focuses = 'client::focus',
   unfocuses = 'client::unfocus',
   fullscreens = 'client::fullscreen',
+  retitles = 'client::title_changed',
   tags_changed = 'tag::change',
   monitor_connected = 'output::connect',
   monitor_disconnected = 'output::disconnect',

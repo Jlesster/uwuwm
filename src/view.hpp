@@ -150,6 +150,19 @@ struct View {
     uint32_t border_color_active_override   = 0;
     uint32_t border_color_inactive_override = 0;
 
+    // Per-client *unfocused* opacity override, set via uwu.rule()'s
+    // apply.opacity (see l_rule_hook in lua_config.cpp) -- nyaa.rule()'s
+    // `opacity` field is the Lua-side sugar over this, the same
+    // relationship nyaa.rule()'s border fields have to has_border_override
+    // above. Unset (has_opacity_override == false) means "use
+    // server.lua_cfg.settings.inactive_opacity", same as every view
+    // before this existed. Only applies while unfocused -- a focused
+    // view is always fully opaque regardless of this override, matching
+    // how inactive_opacity itself already behaves (see the setFocused
+    // call site in view.cpp).
+    bool  has_opacity_override = false;
+    float opacity_override     = 1.0f;
+
     // Set only via setMinimized() (below), which is what
     // wlr-foreign-toplevel-management-v1's request_minimize handler
     // calls -- there's no compositor keybind for this, only a taskbar/
@@ -244,6 +257,23 @@ struct View {
     // that external caller -- everything else below stays a View-only
     // implementation detail.
     void updateBorderColor(bool focused, float alpha = 1.0f);
+
+    // Same external-caller exception as updateBorderColor just above --
+    // l_client_newindex/l_rule_hook (lua_config.cpp) need to re-push
+    // opacity_override immediately after setting it, same as a
+    // border-color override does via updateBorderColor, rather than
+    // waiting for the next focus change to pick it up. Only does
+    // anything while unfocused, since a focused view is always fully
+    // opaque -- see setFocused's own comment on has_opacity_override.
+    // A thin public wrapper rather than making setOpacity() itself
+    // public -- this is a View member function, so it can call the
+    // still-protected setOpacity() below just fine; lua_config.cpp
+    // (a free function, not a View member) can't, which is exactly
+    // why this wrapper exists. Declared here, defined in view.cpp
+    // (not inline) -- an inline body touching server.focused_view
+    // would need Server to be a complete type in every TU that
+    // includes view.hpp, and view.hpp only forward-declares it.
+    void applyOpacityOverride();
 
 protected:
     // Shared implementations for the request_move/request_resize handlers

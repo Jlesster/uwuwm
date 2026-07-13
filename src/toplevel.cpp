@@ -536,6 +536,11 @@ void XdgToplevel::handleRequestFullscreen() {
 void XdgToplevel::handleSetTitle() {
     title = xdg_toplevel->title ? xdg_toplevel->title : "";
     syncForeignToplevelMeta();
+    // Fired unconditionally, same as client::manage/unmanage -- a rule-only
+    // rc.lua (no title_changed hook registered) pays nothing for this, and
+    // one that wants live tab-title-in-titlebar behavior (browsers retitle
+    // constantly) doesn't need to poll client.title from a timer to get it.
+    server.lua_cfg.fireClientEvent("client::title_changed", this);
 }
 
 void XdgToplevel::handleSetAppId() {

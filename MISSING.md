@@ -84,12 +84,17 @@ a spec, and re-verify against `src/` before trusting an item here for long.
   just deriving lifetime from wlroots' own inhibitor list.
 - **Dwindle (Hyprland-style BSP tiling) landed as a second layout engine,** not
   just master-stack. `dwindle.{hpp,cpp}` is a per-output tree, selected via
-  `uwu.set_layout("dwindle")`, reconciled against the current tiled-view set on
-  every `arrange()` call (there's no separate window-opened/closed tiling hook
-  to hang tree mutation off of).
-  `uwu.dwindle_toggle_split/swap_split/ rotate_split/splitratio/move_to_root`
-  are all live -- see the commented examples already in `rc.lua`. Only
-  compile-verified so far, not smoke-tested against a real session -- see below.
+  `uwu.layout.set("dwindle")` (or `paw.layout.set("dwindle")`),
+  reconciled against the current tiled-view set on every `arrange()` call
+  (there's no separate window-opened/closed tiling hook to hang tree
+  mutation off of).
+  `uwu.layout.dwindle.toggle_split` / `.swap_split` / `.rotate_split` /
+  `.splitratio` / `.move_to_root` are all live -- see the commented
+  examples already in `rc.lua`. Only compile-verified so far, not
+  smoke-tested against a real session -- see below.
+  The earlier flat aliases `uwu.dwindle_*` and `uwu.set_layout("dwindle")`
+  were removed entirely; `uwu.layout.*` and `paw.layout.*` are the only
+  paths in.
 - **xdg-activation-v1 is wired**, contrary to the previous version of this file,
   which claimed no cross-client focus-request channel existed. `xdg_activation`
   in `server.cpp` resolves a `request_activate` event's surface back to a

@@ -79,6 +79,14 @@ nyaa.presets = {
     border_color_active = '#8839ef', -- mauve
     border_color_inactive = '#ccd0da', -- surface0
   },
+  catppuccin_frappe = {
+    border_color_active = '#ca9ee6', -- mauve
+    border_color_inactive = '#414559', -- surface0
+  },
+  catppuccin_macchiato = {
+    border_color_active = '#c6a0f6', -- mauve
+    border_color_inactive = '#363a4f', -- surface0
+  },
   gruvbox_dark = {
     border_color_active = '#fabd2f',
     border_color_inactive = '#3c3836',
@@ -282,17 +290,20 @@ end
 -- nyaa.rule({ when = { app_id = "~steam_app_.*" }, flavor = "nord" })
 -- nyaa.rule({ when = { app_id = "~steam_app_.*" }, border_color_active = "#f38ba8" })
 --
--- Per-client border theming -- sugar over uwu.rule()'s
--- apply.border_color_active/inactive (see l_rule_hook in lua_config.cpp),
--- the same relationship nyaa.wear() has to the global
+-- Per-client appearance -- sugar over uwu.rule()'s
+-- apply.border_color_active/inactive/opacity (see l_rule_hook in
+-- lua_config.cpp), the same relationship nyaa.wear() has to the global
 -- uwu.set("border_color_active", ...) pair. `preset`/`flavor` (mutually
--- exclusive, optional) seed both colors the same way nyaa.wear() does;
--- explicit border_color_active/inactive fields override/extend it, same
--- merge order as nyaa.wear(). Only the two color fields are supported
--- here -- floating/fullscreen/tag/output rules are paw.rule()'s job (or
--- raw uwu.rule()), since those aren't appearance, and per-client
--- background/opacity aren't uwu.rule()-applicable settings at all today
--- (both are global-only -- see uwu.RuleApply in lib/meta/uwu.lua).
+-- exclusive, optional) seed both border colors the same way nyaa.wear()
+-- does; explicit border_color_active/inactive/opacity fields override/
+-- extend it, same merge order as nyaa.wear(). floating/fullscreen/tag/
+-- output stay paw.rule()'s job (or raw uwu.rule()), since those aren't
+-- appearance -- background_color is still global-only (no per-client
+-- equivalent exists at the uwu level, unlike border color and opacity).
+--
+-- nyaa.rule({ when = { app_id = "mpv" }, opacity = 0.85 }) -- e.g. a
+-- picture-in-picture player that should stay slightly see-through
+-- whenever it's not focused.
 function nyaa.rule(spec)
   spec = spec or {}
   if spec.preset and spec.flavor then
@@ -322,6 +333,9 @@ function nyaa.rule(spec)
   end
   if spec.border_color_inactive then
     merged.border_color_inactive = spec.border_color_inactive
+  end
+  if spec.opacity then
+    merged.opacity = spec.opacity
   end
 
   return uwu.rule({

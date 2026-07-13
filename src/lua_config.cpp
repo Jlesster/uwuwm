@@ -578,12 +578,51 @@ int l_client_move_to_output(lua_State* L) {
     return 0;
 }
 
+// c:move(x, y) / c:resize(w, h) -- floating-only, same restriction
+// setFloating already implies: a tiled view's geo is computed by
+// layout::arrange() every time anything changes, so a one-off setGeometry
+// here would just get overwritten by the next arrange() pass (on focus
+// change, another window opening/closing, etc.) instead of sticking --
+// silently doing nothing is worse than the loud, cheap-to-debug error
+// below. Both update floating_geo alongside geo, same as setFloating/
+// setFullscreen already do, so a resize/move survives a fullscreen
+// round-trip instead of being discarded on un-fullscreen restore.
+int l_client_move(lua_State* L) {
+    View* view = checkClient(L, 1);
+    if(!view->is_floating) {
+        luaL_error(L, "uwu.client: move() only works on a floating client");
+        return 0;
+    }
+    wlr_box box        = view->geo;
+    box.x              = static_cast<int>(luaL_checkinteger(L, 2));
+    box.y              = static_cast<int>(luaL_checkinteger(L, 3));
+    view->floating_geo = box;
+    view->setGeometry(box);
+    return 0;
+}
+
+int l_client_resize(lua_State* L) {
+    View* view = checkClient(L, 1);
+    if(!view->is_floating) {
+        luaL_error(L, "uwu.client: resize() only works on a floating client");
+        return 0;
+    }
+    wlr_box box        = view->geo;
+    box.width          = std::max(1, static_cast<int>(luaL_checkinteger(L, 2)));
+    box.height         = std::max(1, static_cast<int>(luaL_checkinteger(L, 3)));
+    view->floating_geo = box;
+    view->setGeometry(box);
+    return 0;
+}
+
 const luaL_Reg kClientMethods[] = {
     {"focus",          l_client_focus         },
     {"kill",           l_client_kill          },
     {"set_tag",        l_client_set_tag       },
     {"toggle_tag",     l_client_toggle_tag    },
     {"move_to_output", l_client_move_to_output},
+    {"move",           l_client_move          },
+    {"resize",         l_client_resize        },
     {nullptr,          nullptr                },
 };
 
@@ -656,6 +695,14 @@ int l_client_index(lua_State* L) {
         }
         return 1;
     }
+    if(k == "opacity") {
+        if(view->has_opacity_override) {
+            lua_pushnumber(L, view->opacity_override);
+        } else {
+            lua_pushnil(L);
+        }
+        return 1;
+    }
     if(k == "geo") {
         lua_newtable(L);
         lua_pushinteger(L, view->geo.x);
@@ -676,7 +723,7 @@ int l_client_index(lua_State* L) {
     return 1;
 }
 
-// __newindex: the two properties actually meant to be assignable
+// __newindex: the properties actually meant to be assignable
 // (client.floating = true, client.fullscreen = true) go through the same
 // View methods a keybind would call, so a rule setting `floating` gets
 // exactly the tiling-policy side effects (re-arrange, geometry restore on
@@ -697,6 +744,12 @@ int l_client_newindex(lua_State* L) {
     }
     if(k == "fullscreen") {
         view->setFullscreen(lua_toboolean(L, 3));
+        return 0;
+    }
+    if(k == "opacity") {
+        view->has_opacity_override = true;
+        view->opacity_override     = static_cast<float>(luaL_checknumber(L, 3));
+        view->applyOpacityOverride();
         return 0;
     }
     if(k == "border_color_active" || k == "border_color_inactive") {
@@ -1006,18 +1059,18 @@ int l_dwindle_move_to_root(lua_State* L) {
 }
 
 // ----------------------------------------------------------------------------
-// uwu.layout.* -- tiling primitives, pulled off the flat uwu table.
+// uwu.layout.* -- tiling primitives, namespaced off the flat uwu table.
 //
 // set_layout/inc_master/dwindle_* used to sit directly on `uwu` alongside
 // spawn/quit/bind -- lifecycle calls with nothing to do with tiling. paw
-// (lib/paw/init.lua) is documented as "sugar over the raw uwu C API", but
-// there was no raw *tiling* namespace for it to be sugar over: it had to
-// reach past uwu.set_layout()/uwu.inc_master() as bare top-level calls,
-// same as any lifecycle function. uwu.layout groups exactly the primitives
-// paw.layout (see lib/paw/init.lua) wraps, so that relationship is a real
-// namespace-to-namespace one now instead of "sugar over eleven miscellaneous
-// entries in a flat 22-function table." The flat names below stay as
-// deprecated aliases.
+// (lib/paw/init.lua) is documented as "sugar over the raw uwu C API", and
+// uwu.layout groups exactly the primitives paw.layout (see lib/paw/init.lua)
+// wraps, so that relationship is a real namespace-to-namespace one instead
+// of "sugar over eleven miscellaneous entries in a flat 22-function table."
+// The old flat names (uwu.set_layout/uwu.inc_master/uwu.dwindle_*) have been
+// removed outright -- uwu.layout.*/uwu.layout.dwindle.* is the only path to
+// these now, so uwu/paw/nyaa stay three cleanly separated namespaces instead
+// of uwu carrying both a namespaced and a flat copy of the same primitives.
 int l_layout_set(lua_State* L) { return l_set_layout(L); }
 int l_layout_inc_master(lua_State* L) { return l_inc_master(L); }
 int l_layout_dwindle_toggle_split(lua_State* L) {
@@ -1033,47 +1086,6 @@ int l_layout_dwindle_splitratio(lua_State* L) {
     return l_dwindle_splitratio(L);
 }
 int l_layout_dwindle_move_to_root(lua_State* L) {
-    return l_dwindle_move_to_root(L);
-}
-
-// Deprecated flat-`uwu` aliases -- same bodies as above, just logged, so
-// an rc.lua written before uwu.layout existed keeps working verbatim.
-int l_deprecated_set_layout(lua_State* L) {
-    wlr_log(WLR_INFO, "uwu.set_layout: deprecated, use uwu.layout.set");
-    return l_set_layout(L);
-}
-int l_deprecated_inc_master(lua_State* L) {
-    wlr_log(WLR_INFO, "uwu.inc_master: deprecated, use uwu.layout.inc_master");
-    return l_inc_master(L);
-}
-int l_deprecated_dwindle_toggle_split(lua_State* L) {
-    wlr_log(WLR_INFO,
-            "uwu.dwindle_toggle_split: deprecated, use "
-            "uwu.layout.dwindle.toggle_split");
-    return l_dwindle_toggle_split(L);
-}
-int l_deprecated_dwindle_swap_split(lua_State* L) {
-    wlr_log(WLR_INFO,
-            "uwu.dwindle_swap_split: deprecated, use "
-            "uwu.layout.dwindle.swap_split");
-    return l_dwindle_swap_split(L);
-}
-int l_deprecated_dwindle_rotate_split(lua_State* L) {
-    wlr_log(WLR_INFO,
-            "uwu.dwindle_rotate_split: deprecated, use "
-            "uwu.layout.dwindle.rotate_split");
-    return l_dwindle_rotate_split(L);
-}
-int l_deprecated_dwindle_splitratio(lua_State* L) {
-    wlr_log(WLR_INFO,
-            "uwu.dwindle_splitratio: deprecated, use "
-            "uwu.layout.dwindle.splitratio");
-    return l_dwindle_splitratio(L);
-}
-int l_deprecated_dwindle_move_to_root(lua_State* L) {
-    wlr_log(WLR_INFO,
-            "uwu.dwindle_move_to_root: deprecated, use "
-            "uwu.layout.dwindle.move_to_root");
     return l_dwindle_move_to_root(L);
 }
 
@@ -1324,8 +1336,8 @@ const luaL_Reg kSystemVolumeFuncs[] = {
 
 // uwu.hook(event, fn) -> id. `event` is one of "client::manage",
 // "client::unmanage", "client::focus", "client::unfocus",
-// "client::fullscreen" (fn receives the Client), "tag::change" (fn
-// receives monitor_name, new_tagset), or "output::connect"/
+// "client::fullscreen", "client::title_changed" (fn receives the Client),
+// "tag::change" (fn receives monitor_name, new_tagset), or "output::connect"/
 // "output::disconnect" (fn receives monitor_name). Unknown event names
 // are accepted, not rejected -- a hook for an event nothing ever fires is
 // harmless dead weight, not a bug worth a hard error, and it keeps this
@@ -1391,6 +1403,18 @@ int l_rule_hook(lua_State* L) {
     // `match = { floating = true }` target "whatever the compositor
     // already guessed was a dialog," which a plain app_id/title match
     // can't express at all.
+    //
+    // That guarantee is per-rule only, not global: every uwu.rule() call
+    // registers its own ordinary client::manage hook (see l_rule below),
+    // and fireClientEvent runs every matching hook in registration order
+    // against the same live View -- so a `match.floating = true` rule
+    // registered *after* another rule that sets `apply.floating = true`
+    // WILL see that earlier rule's change already applied. A "catch every
+    // auto-detected floater" rule (rc.lua's own shipped example is one)
+    // needs to be registered before any rule that itself floats a
+    // client, or it'll also catch whatever those later rules just
+    // floated -- registration order is the only lever here, there's no
+    // per-rule priority/phase to reach for instead.
     if(has_match_floating && view->is_floating != match_floating) { return 0; }
 
     lua_pushvalue(L, lua_upvalueindex(5));  // the `apply` table
@@ -1401,6 +1425,8 @@ int l_rule_hook(lua_State* L) {
     std::string output_name;
     bool        has_border_active = false, has_border_inactive = false;
     std::string border_active_str, border_inactive_str;
+    bool        has_opacity = false;
+    double      opacity     = 1.0;
     getOptionalField(L, -1, "floating", floating, has_floating);
     getOptionalField(L, -1, "fullscreen", fullscreen, has_fullscreen);
     getOptionalField(L, -1, "tag", tag, has_tag);
@@ -1412,6 +1438,7 @@ int l_rule_hook(lua_State* L) {
                      "border_color_inactive",
                      border_inactive_str,
                      has_border_inactive);
+    getOptionalField(L, -1, "opacity", opacity, has_opacity);
     lua_pop(L, 1);
 
     // Same seed-both-from-current-globals behavior as the client.
@@ -1436,6 +1463,18 @@ int l_rule_hook(lua_State* L) {
                 parseColor(border_inactive_str.c_str());
         }
         view->updateBorderColor(server->focused_view == view);
+    }
+
+    // Same has_opacity_override/opacity_override pair uwu.client's opacity
+    // setter (l_client_newindex) would seed -- see the View::opacity_override
+    // comment in view.hpp. applyOpacityOverride() (also view.hpp) only
+    // takes effect while unfocused (matching inactive_opacity's own
+    // behavior); a currently-focused view stays at full opacity either
+    // way.
+    if(has_opacity) {
+        view->has_opacity_override = true;
+        view->opacity_override     = static_cast<float>(opacity);
+        view->applyOpacityOverride();
     }
 
     // Same effects a hand-written client::manage hook could reach for
@@ -1479,7 +1518,8 @@ int l_rule_hook(lua_State* L) {
 }
 
 // uwu.rule({match = {app_id=, title=}, apply = {floating=, fullscreen=,
-// tag=}}) -- sugar over uwu.hook("client::manage", ...), not a separate
+// tag=, output=, border_color_active=, border_color_inactive=, opacity=}})
+// -- sugar over uwu.hook("client::manage", ...), not a separate
 // rule engine: it registers exactly one ordinary hook (l_rule_hook above)
 // per call, so a rule inherits the same timeout/recursion guard every
 // other hook gets, and "why didn't my rule fire" is debuggable by reading
@@ -1645,10 +1685,26 @@ int l_monitor_list(lua_State* L) {
     return 1;
 }
 
+// uwu.monitor.focused() -> name string, or nil if nothing's focused yet
+// (true only in the brief window before the first output connects). Every
+// entry in list() already carries a `focused` bool -- this is the same
+// data, just without every caller that only wants "which one" needing its
+// own linear scan/pairs() loop over list()'s result.
+int l_monitor_focused(lua_State* L) {
+    Server* server = getServer(L);
+    if(server->focused_output) {
+        lua_pushstring(L, server->focused_output->wlr_output->name);
+    } else {
+        lua_pushnil(L);
+    }
+    return 1;
+}
+
 const luaL_Reg kMonitorFuncs[] = {
-    {"set",   l_monitor_set },
-    {"list",  l_monitor_list},
-    {nullptr, nullptr       },
+    {"set",     l_monitor_set    },
+    {"list",    l_monitor_list   },
+    {"focused", l_monitor_focused},
+    {nullptr,   nullptr          },
 };
 
 // ----------------------------------------------------------------------------
@@ -2048,29 +2104,22 @@ const luaL_Reg kBehaviorFuncs[] = {
 };
 
 const luaL_Reg kuwuwmFuncs[] = {
-    {"spawn",                l_spawn                          },
-    {"bind",                 l_bind                           },
-    {"set",                  l_set                            },
-    {"get",                  l_get                            },
-    {"quit",                 l_quit                           },
-    {"reload",               l_reload                         },
-    {"hook",                 l_hook                           },
-    {"unhook",               l_unhook                         },
-    {"rule",                 l_rule                           },
-    {"kill",                 l_kill                           },
-    {"focus_next",           l_focus_next                     },
-    {"focus_prev",           l_focus_prev                     },
-    {"toggle_floating",      l_toggle_floating                },
-    {"toggle_fullscreen",    l_toggle_fullscreen              },
-    {"inc_master",           l_deprecated_inc_master          },
-    {"focus_monitor",        l_focus_monitor                  },
-    {"set_layout",           l_deprecated_set_layout          },
-    {"dwindle_toggle_split", l_deprecated_dwindle_toggle_split},
-    {"dwindle_swap_split",   l_deprecated_dwindle_swap_split  },
-    {"dwindle_rotate_split", l_deprecated_dwindle_rotate_split},
-    {"dwindle_splitratio",   l_deprecated_dwindle_splitratio  },
-    {"dwindle_move_to_root", l_deprecated_dwindle_move_to_root},
-    {nullptr,                nullptr                          },
+    {"spawn",             l_spawn            },
+    {"bind",              l_bind             },
+    {"set",               l_set              },
+    {"get",               l_get              },
+    {"quit",              l_quit             },
+    {"reload",            l_reload           },
+    {"hook",              l_hook             },
+    {"unhook",            l_unhook           },
+    {"rule",              l_rule             },
+    {"kill",              l_kill             },
+    {"focus_next",        l_focus_next       },
+    {"focus_prev",        l_focus_prev       },
+    {"toggle_floating",   l_toggle_floating  },
+    {"toggle_fullscreen", l_toggle_fullscreen},
+    {"focus_monitor",     l_focus_monitor    },
+    {nullptr,             nullptr            },
 };
 
 // Embedded fallback, used only if no rc.lua is found on disk. Mirrors the
@@ -2102,19 +2151,19 @@ uwu.bind({"mod"}, "k", function() uwu.focus_prev() end)
 uwu.bind({"mod", "shift"}, "c", function() uwu.kill() end)
 uwu.bind({"mod"}, "space", function() uwu.toggle_floating() end)
 uwu.bind({"mod"}, "f", function() uwu.toggle_fullscreen() end)
-uwu.bind({"mod"}, "i", function() uwu.inc_master(0.05) end)
-uwu.bind({"mod"}, "u", function() uwu.inc_master(-0.05) end)
+uwu.bind({"mod"}, "i", function() uwu.layout.inc_master(0.05) end)
+uwu.bind({"mod"}, "u", function() uwu.layout.inc_master(-0.05) end)
 uwu.bind({"mod"}, "Tab", function() uwu.focus_monitor(1) end)
 
 -- Dwindle (Hyprland-style BSP) tiling is available as an alternative to
 -- the default master-stack layout -- uncomment to switch the focused
 -- monitor to it, and to get togglesplit/swapsplit/splitratio bindings:
--- uwu.set_layout("dwindle")
--- uwu.bind({"mod"}, "p", function() uwu.dwindle_toggle_split() end)
--- uwu.bind({"mod", "shift"}, "p", function() uwu.dwindle_swap_split() end)
--- uwu.bind({"mod"}, "r", function() uwu.dwindle_rotate_split() end)
--- uwu.bind({"mod"}, "minus", function() uwu.dwindle_splitratio(-0.1) end)
--- uwu.bind({"mod"}, "equal", function() uwu.dwindle_splitratio(0.1) end)
+-- uwu.layout.set("dwindle")
+-- uwu.bind({"mod"}, "p", function() uwu.layout.dwindle.toggle_split() end)
+-- uwu.bind({"mod", "shift"}, "p", function() uwu.layout.dwindle.swap_split() end)
+-- uwu.bind({"mod"}, "r", function() uwu.layout.dwindle.rotate_split() end)
+-- uwu.bind({"mod"}, "minus", function() uwu.layout.dwindle.splitratio(-0.1) end)
+-- uwu.bind({"mod"}, "equal", function() uwu.layout.dwindle.splitratio(0.1) end)
 
 for i = 1, uwu.tag_count do
 	uwu.bind({"mod"}, tostring(i), function() uwu.tag.view(i) end)

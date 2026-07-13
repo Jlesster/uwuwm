@@ -166,6 +166,21 @@ void View::setFloating(bool floating) {
     wlr_box box  = centeredFloatBox(content_w, content_h);
     floating_geo = box;
     setGeometry(box);
+
+    // This view just left the tiled set -- the remaining tiled siblings
+    // are still sized/positioned for a layout that included it (they
+    // were arranged with this view still occupying a slot, most recently
+    // at map time -- see XdgToplevel::handleMap/XWaylandView::handleMap
+    // -- or the last time anything else changed the tiled set). Without
+    // this, a rule like `apply.floating = true` (l_rule_hook),
+    // `client.floating = true` (l_client_newindex), or
+    // paw.client.toggle_floating() leaves a gap where this view used to
+    // sit instead of the rest of the layout reclaiming it -- the
+    // asymmetric twin of the `if(!floating)` branch two lines up, which
+    // already re-arranges when a view rejoins the tiled set. arrange()
+    // itself skips is_floating views when placing geometry, so this is
+    // safe to call after setGeometry(box) already placed *this* view.
+    layout::arrange(*output);
 }
 
 void View::setTags(uint32_t new_tags) {
@@ -243,6 +258,14 @@ void View::updateBorderColor(bool focused, float alpha) {
     for(auto* rect : border_rects) { wlr_scene_rect_set_color(rect, color); }
 }
 
+// Out-of-line (not inline in view.hpp) specifically so this can touch
+// server.focused_view -- view.hpp only forward-declares Server, so an
+// inline body here would need Server to be a complete type in every TU
+// that includes view.hpp, which most of them don't otherwise need.
+void View::applyOpacityOverride() {
+    if(server.focused_view != this) { setOpacity(opacity_override, false); }
+}
+
 void View::setFocused(bool focused) {
     // inactive_opacity (default 1.0 == disabled) rides the same
     // setOpacity()/updateBorderColor() path ViewAnimation's tweens use, so
@@ -254,7 +277,10 @@ void View::setFocused(bool focused) {
     // read true for the view that's losing focus right here -- silently
     // painting the active border color (just dimmed) instead of the
     // inactive one. Passing `focused` straight through is the fix.
-    setOpacity(focused ? 1.0f : server.lua_cfg.settings.inactive_opacity,
+    setOpacity(focused ? 1.0f
+                       : (has_opacity_override
+                              ? opacity_override
+                              : server.lua_cfg.settings.inactive_opacity),
                focused);
     activateBackend(focused);
     if(foreign_toplevel) {

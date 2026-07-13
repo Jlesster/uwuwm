@@ -22,9 +22,10 @@
 --   nyaa  aesthetics only -- two-color presets (nyaa.presets) or full
 --         26-role palettes (nyaa.palettes/nyaa.palette(), Catppuccin's
 --         four flavors plus a few others), applied via nyaa.wear() /
---         per-client via nyaa.rule(), plus nyaa.export.* to render the
---         same palette into config snippets for the rest of your DE
---         (GTK, kitty, foot, waybar, dunst)
+--         per-client via nyaa.rule() (border colors *and* opacity),
+--         plus nyaa.export.* to render the same palette into config
+--         snippets for the rest of your DE (GTK, kitty, foot, waybar,
+--         dunst, wezterm, fuzzel)
 --
 -- (lib/paw, lib/nyaa -- see extendPackagePath() in lua_config.cpp for
 -- where those get found). A wibox-equivalent (status bar / widgets) is
@@ -61,12 +62,13 @@ nyaa.wear({
 
 -- nyaa.export.* renders the same palette nyaa.wear() just applied into
 -- config snippets for the rest of your desktop (GTK, kitty, foot,
--- waybar, dunst -- see lib/nyaa/export.lua for the full target list and
--- what each one assumes about where you'll point it). write_all() writes
--- every target's file into one directory in a single call; point your
--- other apps' configs at files under here (an @import in gtk.css, an
--- `include` in kitty.conf, ...) and they pick up whatever nyaa.wear()
--- above chose on every uwu.reload().
+-- waybar, dunst, wezterm, fuzzel -- see lib/nyaa/export.lua for the full
+-- target list and what each one assumes about where you'll point it).
+-- write_all() writes every target's file into one directory in a single
+-- call; point your other apps' configs at files under here (an @import
+-- in gtk.css, `require("colors-uwuwm")` merged into `config.colors` in
+-- wezterm.lua, an `include` in fuzzel.ini, ...) and they pick up
+-- whatever nyaa.wear() above chose on every uwu.reload().
 --
 -- local ok, errs = nyaa.export.write_all(
 --   os.getenv('HOME') .. '/.cache/uwuwm-theme',
@@ -131,6 +133,77 @@ local keys = {
   { { 'mod', 'shift' }, 'c', paw.client.kill, 'close focused window' },
   { mod, 'space', paw.client.toggle_floating, 'toggle floating' },
   { mod, 'f', paw.client.toggle_fullscreen, 'toggle fullscreen' },
+
+  -- Floating-window nudges -- paw.client.move/resize (relative deltas on
+  -- the focused client). No-op with nothing focused; errors loudly on a
+  -- *tiled* client instead of silently doing nothing, same restriction
+  -- the raw c:move()/c:resize() have (see their comment in
+  -- lua_config.cpp) -- these binds are only meaningful once mod+space
+  -- above has floated something.
+  {
+    { 'mod', 'alt' },
+    'h',
+    function()
+      paw.client.move(-20, 0)
+    end,
+    'nudge floating window left',
+  },
+  {
+    { 'mod', 'alt' },
+    'l',
+    function()
+      paw.client.move(20, 0)
+    end,
+    'nudge floating window right',
+  },
+  {
+    { 'mod', 'alt' },
+    'j',
+    function()
+      paw.client.move(0, 20)
+    end,
+    'nudge floating window down',
+  },
+  {
+    { 'mod', 'alt' },
+    'k',
+    function()
+      paw.client.move(0, -20)
+    end,
+    'nudge floating window up',
+  },
+  {
+    { 'mod', 'alt', 'shift' },
+    'l',
+    function()
+      paw.client.resize(20, 0)
+    end,
+    'grow floating window width',
+  },
+  {
+    { 'mod', 'alt', 'shift' },
+    'h',
+    function()
+      paw.client.resize(-20, 0)
+    end,
+    'shrink floating window width',
+  },
+  {
+    { 'mod', 'alt', 'shift' },
+    'j',
+    function()
+      paw.client.resize(0, 20)
+    end,
+    'grow floating window height',
+  },
+  {
+    { 'mod', 'alt', 'shift' },
+    'k',
+    function()
+      paw.client.resize(0, -20)
+    end,
+    'shrink floating window height',
+  },
   {
     mod,
     'i',
@@ -154,6 +227,23 @@ local keys = {
       uwu.focus_monitor(1)
     end,
     'focus next monitor',
+  },
+  {
+    { 'mod', 'shift' },
+    'Tab',
+    function()
+      -- paw.monitor.focused()/each() -- workflow sugar over
+      -- uwu.monitor.focused()/list(), same relationship paw.client has
+      -- to uwu.client. Swap the print() for notify-send/eww/whatever
+      -- your bar reads from for an actual on-screen monitor indicator.
+      print('focused output: ' .. (paw.monitor.focused() or '?'))
+      paw.monitor.each(function(m)
+        print(
+          ('  %s %dx%d @ %d,%d'):format(m.name, m.width, m.height, m.x, m.y)
+        )
+      end)
+    end,
+    'print monitor layout',
   },
   {
     mod,
@@ -327,34 +417,53 @@ uwu.input.set('type:touchpad', {
 -- auto-detected before this rule runs), `set` is what gets applied.
 -- paw.like(pattern) marks a field as a Lua pattern (uwuwm's own "~"
 -- prefix convention) instead of an exact string match.
+--
+-- Registration order matters here: uwu.rule()'s hooks fire in the order
+-- they're registered, on the same live client, so a *later* rule sees
+-- whatever an *earlier* rule already changed. The auto-detected-floating
+-- catch-all right below has to be registered first for exactly that
+-- reason -- registered last, it'd also catch anything an app-specific
+-- rule below it had *just* floated (pavucontrol, say), silently
+-- reassigning it to tag 9 as a side effect of a rule that only meant to
+-- set `floating`. Registered first, it only ever sees whichever clients
+-- handleMap's own floating auto-detection already decided on (a parented
+-- window, a fixed-size dialog, an X11 _NET_WM_WINDOW_TYPE_DIALOG/
+-- UTILITY/SPLASH) -- one rule instead of naming every file-picker/
+-- color-chooser app_id by hand -- before any rule below it has floated
+-- anything else.
+paw.rule({ when = { floating = true }, set = { tag = 9 } })
+
 paw.rule({ when = { app_id = 'mpv' }, set = { floating = true, tag = 3 } })
 paw.rule({ when = { app_id = 'foot' }, set = { tag = 1 } })
 paw.rule({ when = { app_id = 'pavucontrol' }, set = { floating = true } })
 paw.rule({ when = { app_id = paw.like('steam_app_.*') }, set = { tag = 9 } })
--- Anything already auto-detected as floating (a parent window, a
--- fixed-size dialog, or an X11 client with
--- _NET_WM_WINDOW_TYPE_DIALOG/UTILITY/SPLASH) that isn't caught by a
--- more specific rule above still gets parked on the scratch tag
--- (9) -- one rule instead of naming every file-picker/color-chooser
--- app_id by hand.
-paw.rule({ when = { floating = true }, set = { tag = 9 } })
 
 -- Per-client border theming -- nyaa.rule(), sugar over uwu.rule()'s
--- apply.border_color_active/inactive. `preset` seeds both colors from
--- nyaa.presets; explicit fields override/extend it, same as nyaa.wear().
+-- apply.border_color_active/inactive/opacity. `preset` seeds both colors
+-- from nyaa.presets; explicit fields override/extend it, same as
+-- nyaa.wear().
 nyaa.rule({ when = { app_id = 'mpv' }, border_color_active = '#f9e2af' }) -- catppuccin yellow
 nyaa.rule({ when = { app_id = paw.like('steam_app_.*') }, preset = 'nord' })
+
+-- Per-client opacity -- only takes effect while the client is unfocused
+-- (a focused window is always fully opaque, same as the global
+-- inactive_opacity above). A picture-in-picture mpv instance (see the
+-- floating+tag-3 paw.rule above) staying legible-but-see-through when
+-- you're not actively looking at it is the obvious use, but anything
+-- floating benefits -- pavucontrol, a scratch terminal, etc.
+nyaa.rule({ when = { app_id = 'mpv' }, opacity = 0.85 })
 
 -- ── Hooks ──────────────────────────────────────────────────────────────
 -- paw.on(event, fn) is uwu.hook() with short verb names in place of the
 -- raw "client::"-prefixed event strings -- "opens"/"closes"/"focuses"/
--- "unfocuses"/"fullscreens" (fn gets the same Client userdata either
--- way: c.title, c.app_id, c.is_xwayland, c.tags, c.floating,
--- c.fullscreen, c.output, c.geo, c:focus(), c:kill(), c:set_tag(n),
--- c:toggle_tag(n), c:move_to_output(name)), plus "tags_changed"
--- (monitor_name, new_tagset), "monitor_connected"/"monitor_disconnected"
--- (monitor_name). Any raw "namespace::event" string works too, unchanged
--- -- paw.on() only rewrites the names it recognizes.
+-- "unfocuses"/"fullscreens"/"retitles" (fn gets the same Client userdata
+-- either way: c.title, c.app_id, c.is_xwayland, c.tags, c.floating,
+-- c.fullscreen, c.output, c.geo, c.opacity, c:focus(), c:kill(),
+-- c:set_tag(n), c:toggle_tag(n), c:move_to_output(name), c:move(x, y),
+-- c:resize(w, h)), plus "tags_changed" (monitor_name, new_tagset),
+-- "monitor_connected"/"monitor_disconnected" (monitor_name). Any raw
+-- "namespace::event" string works too, unchanged -- paw.on() only
+-- rewrites the names it recognizes.
 --
 -- paw.off(id) removes a registration later -- handy for ad-hoc hooks (a
 -- "focus this app" toggle keybind, say) without leaving a permanent
@@ -369,6 +478,16 @@ local focus_steam_id = paw.on('focuses', function(c)
 end)
 
 paw.off(focus_steam_id) -- to remove the hook above later.
+
+-- "retitles" fires on every title change, browsers especially (a tab
+-- switch retitles the whole window) -- useful for anything that wants a
+-- live title without polling c.title from a timer, e.g. syncing a
+-- specific client's title out to a status-bar widget:
+paw.on('retitles', function(c)
+  if c.app_id == 'firefox' then
+    print('firefox title -> ' .. c.title)
+  end
+end)
 
 -- ── Querying current state ─────────────────────────────────────────────
 -- uwu.client.list() and uwu.client.focused() round out the read side --

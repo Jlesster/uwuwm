@@ -138,32 +138,6 @@ function uwu.focus_monitor(dir) end
 -- uwu.focus_next/toggle_floating/etc; prefer paw.layout in an rc.lua
 -- unless you're writing your own tiling-facing module.
 
----@deprecated Use uwu.layout.inc_master() instead.
----@param delta number
-function uwu.inc_master(delta) end
-
----@deprecated Use uwu.layout.set() instead.
----@param name "master"|"masterstack"|"master_stack"|"dwindle"
-function uwu.set_layout(name) end
-
----@deprecated Use uwu.layout.dwindle.toggle_split() instead.
-function uwu.dwindle_toggle_split() end
-
----@deprecated Use uwu.layout.dwindle.swap_split() instead.
-function uwu.dwindle_swap_split() end
-
----@deprecated Use uwu.layout.dwindle.rotate_split() instead.
----@param angle? integer
-function uwu.dwindle_rotate_split(angle) end
-
----@deprecated Use uwu.layout.dwindle.splitratio() instead.
----@param delta number
-function uwu.dwindle_splitratio(delta) end
-
----@deprecated Use uwu.layout.dwindle.move_to_root() instead.
----@param stable? boolean
-function uwu.dwindle_move_to_root(stable) end
-
 ---@class uwu.layout
 uwu.layout = {}
 
@@ -205,11 +179,12 @@ function uwu.layout.dwindle.move_to_root(stable) end
 
 ---Registers a listener for one of uwuwm's own events and returns an id
 ---for uwu.unhook(). Event names: "client::manage", "client::unmanage",
----"client::focus", "client::unfocus", "client::fullscreen" (fn receives
----the uwu.Client), "tag::change" (fn receives monitor_name: string,
----new_tagset: integer), "output::connect"/"output::disconnect" (fn
----receives monitor_name: string). Unknown event names are accepted, not
----rejected -- see l_hook's comment in lua_config.cpp.
+---"client::focus", "client::unfocus", "client::fullscreen",
+---"client::title_changed" (fn receives the uwu.Client), "tag::change" (fn
+---receives monitor_name: string, new_tagset: integer),
+---"output::connect"/"output::disconnect" (fn receives monitor_name:
+---string). Unknown event names are accepted, not rejected -- see l_hook's
+---comment in lua_config.cpp.
 ---@param event string
 ---@param fn fun(...)
 ---@return integer id
@@ -231,6 +206,7 @@ function uwu.unhook(id) end
 ---@field output? string  Output name (see uwu.monitor.list()).
 ---@field border_color_active? string  "#rrggbb"/"#rrggbbaa". Setting either color seeds both from current global settings first -- see l_rule_hook's comment.
 ---@field border_color_inactive? string  "#rrggbb"/"#rrggbbaa".
+---@field opacity? number  0.0-1.0. Only applies while the client is unfocused -- a focused client is always fully opaque.
 
 ---Sugar over uwu.hook("client::manage", ...) -- registers one rule and
 ---returns its hook id (same as uwu.hook()'s return, usable with
@@ -302,6 +278,12 @@ function uwu.monitor.set(name, opts) end
 ---Lists every currently connected output.
 ---@return uwu.MonitorInfo[]
 function uwu.monitor.list() end
+
+---Name of the currently focused output, or nil in the brief window
+---before the first output has connected. Same data as the `focused`
+---field on one of uwu.monitor.list()'s entries, without the scan.
+---@return string?
+function uwu.monitor.focused() end
 
 -- ── wallpaper ────────────────────────────────────────────────────────────
 
@@ -403,6 +385,7 @@ function uwu.input.list() end
 ---@field geo uwu.ClientGeo  Read-only.
 ---@field border_color_active? string  Read/write, "#rrggbb"/"#rrggbbaa". nil until a rule or a direct write first sets an override; writing either color seeds both from current global settings.
 ---@field border_color_inactive? string  Read/write, "#rrggbb"/"#rrggbbaa". See border_color_active.
+---@field opacity? number  Read/write, 0.0-1.0. nil until a rule or a direct write first sets an override. Only applies while unfocused.
 local Client = {}
 
 ---Focuses this client.
@@ -424,6 +407,19 @@ function Client:toggle_tag(n) end
 ---adopting the destination output's visible tagset.
 ---@param name string
 function Client:move_to_output(name) end
+
+---Repositions a *floating* client to an absolute (x, y). Errors on a
+---tiled client -- its geo is recomputed by every layout pass, so a
+---one-off move here would just be overwritten by the next arrange().
+---@param x integer
+---@param y integer
+function Client:move(x, y) end
+
+---Resizes a *floating* client to (width, height), keeping its current
+---top-left corner fixed. Same tiled-client restriction as Client:move().
+---@param width integer
+---@param height integer
+function Client:resize(width, height) end
 
 ---@class uwu.client
 uwu.client = {}
