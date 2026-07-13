@@ -248,9 +248,9 @@ void XWaylandView::handleSurfaceCommit() {
                     geo.height,
                     min_w,
                     min_h);
-            is_floating = true;
-            int w = min_w > 0 ? min_w : 0;
-            int h = min_h > 0 ? min_h : 0;
+            is_floating  = true;
+            int     w    = min_w > 0 ? min_w : 0;
+            int     h    = min_h > 0 ? min_h : 0;
             wlr_box box  = centeredFloatBox(w, h);
             floating_geo = box;
             setGeometry(box);
@@ -358,6 +358,20 @@ void XWaylandView::handleMap() {
 
     if(output) { layout::arrange(*output); }
 
+    // Same reasoning as XdgToplevel::handleMap: an X11 client can set
+    // _NET_WM_STATE_FULLSCREEN as an initial window property before it's
+    // ever mapped -- output was still null then, so an earlier
+    // request_fullscreen (if wlroots even fired one for the initial-
+    // property case, which isn't guaranteed the way a later client
+    // message is) couldn't have applied anything either. xsurface->
+    // fullscreen is the live, authoritative EWMH state regardless of how
+    // it got set, so check it directly rather than depending on having
+    // seen an event for it.
+    if(xsurface->fullscreen) {
+        is_fullscreen = false;
+        setFullscreen(true);
+    }
+
     // Mirror XdgToplevel::handleMap: resizable clients whose declared
     // WM_NORMAL_HINTS min size is larger than the tile the layout just
     // gave us should be floated, not tiled. ICCCM has no real-time
@@ -378,8 +392,7 @@ void XWaylandView::handleMap() {
             int buf_h = geo.height - 2 * b;
             int min_w = sh->min_width;
             int min_h = sh->min_height;
-            if((min_w > 0 && buf_w < min_w) ||
-               (min_h > 0 && buf_h < min_h)) {
+            if((min_w > 0 && buf_w < min_w) || (min_h > 0 && buf_h < min_h)) {
                 is_floating   = true;
                 float_for_min = true;
                 // Drop our tile reservation now that we're floating.
@@ -388,19 +401,23 @@ void XWaylandView::handleMap() {
         }
     }
 
-    if(is_floating && output) {
+    // is_fullscreen check: setFullscreen(true) above already placed this
+    // view at output->layout_box and owns its geometry until it's
+    // cleared. Centering it into a floating box here would immediately
+    // clobber that -- see the matching guard in XdgToplevel::handleMap.
+    if(is_floating && !is_fullscreen && output) {
         int w, h;
         if(float_for_min) {
             // Size the float at the ICCCM min floor that triggered the
             // flip -- same shape as XdgToplevel::handleMap's
             // float_for_min branch.
             xcb_size_hints_t* sh = xsurface->size_hints;
-            w                    = (sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE))
-                                      ? sh->min_width
-                                      : 0;
-            h                    = (sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE))
-                                      ? sh->min_height
-                                      : 0;
+            w = (sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE))
+                    ? sh->min_width
+                    : 0;
+            h = (sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE))
+                    ? sh->min_height
+                    : 0;
         } else {
             w = xsurface->width;
             h = xsurface->height;

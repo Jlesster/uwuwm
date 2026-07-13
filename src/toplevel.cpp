@@ -111,7 +111,23 @@ void XdgToplevel::handleMap() {
 
     if(output) { layout::arrange(*output); }
 
-    if(is_floating && output) {
+    // A client can call xdg_toplevel.set_fullscreen() before its first
+    // commit -- output was still null then, so View::setFullscreen
+    // recorded is_fullscreen but couldn't call into the backend or place
+    // the geometry (see that function). output exists now; re-derive the
+    // client's actual requested state directly from xdg_toplevel (not our
+    // own is_fullscreen, which setFullscreen's early-return may have left
+    // set without ever having applied anything) and apply it for real.
+    if(xdg_toplevel->requested.fullscreen) {
+        is_fullscreen = false;
+        setFullscreen(true);
+    }
+
+    // is_fullscreen check: setFullscreen(true) above already placed this
+    // view at output->layout_box and owns its geometry until it's
+    // cleared. Centering it into a floating box here would immediately
+    // clobber that -- see the matching guard in XWaylandView::handleMap.
+    if(is_floating && !is_fullscreen && output) {
         wlr_box geo_box = xdg_toplevel->base->geometry;
         wlr_box box     = centeredFloatBox(geo_box.width, geo_box.height);
         floating_geo    = box;

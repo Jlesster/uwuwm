@@ -178,9 +178,19 @@ void View::setTags(uint32_t new_tags) {
 void View::setFullscreen(bool fullscreen) {
     if(is_fullscreen == fullscreen) { return; }
     is_fullscreen = fullscreen;
-    setFullscreenBackend(fullscreen);
 
+    // Record intent even if we're not mapped yet (output still null) --
+    // handleMap re-derives the client's requested fullscreen state once
+    // output is assigned and calls back in here. But don't touch the
+    // backend before that: a client that requests fullscreen before its
+    // first commit (common for exclusive-fullscreen games calling
+    // set_fullscreen() immediately after creating the toplevel) would
+    // otherwise reach wlr_xdg_toplevel_set_fullscreen/schedule_configure
+    // on a not-yet-initialized surface -- the same base->initialized
+    // hazard decoration.cpp and handleRequestMaximize already guard
+    // against, just reached from a different call path.
     if(!output) { return; }
+    setFullscreenBackend(fullscreen);
 
     if(fullscreen) {
         floating_geo = geo;

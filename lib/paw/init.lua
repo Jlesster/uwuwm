@@ -143,7 +143,7 @@ paw.client = {
 
 -- ── keybinds ─────────────────────────────────────────────────────────────
 -- paw.keys({
---   { {"mod"}, "Return", function() paw.spawn(terminal) end, "open a terminal" },
+--   { {"mod"}, "Return", function() uwu.spawn(terminal) end, "open a terminal" },
 --   ...
 -- })
 --
@@ -155,6 +155,14 @@ paw.client = {
 -- paw.keymap so a future which-key-style overlay (or just `for _, k in
 -- ipairs(paw.keymap) do print(...) end` from a keybind of your own) has
 -- something to read.
+--
+-- Note this example calls uwu.spawn directly, not a paw-wrapped version --
+-- spawning a command isn't a window-management *action* the way
+-- paw.client/paw.layout are (there's no shape to give it beyond the one
+-- raw call), so it deliberately stays on `uwu` rather than getting a
+-- pointless paw.spawn wrapper. See rc.lua's own header comment: "all
+-- three styles compose freely in the same rc.lua" -- uwu.spawn sitting
+-- next to paw.keys() in the same table is expected, not a layering leak.
 paw.keymap = {}
 
 function paw.keys(specs)

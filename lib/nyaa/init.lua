@@ -55,6 +55,16 @@ local nyaa = {}
 nyaa.export = require('nyaa.export')
 nyaa.wallpaper = require('nyaa.wallpaper')
 
+-- The raw table nyaa.palette(name) reads from -- exposed directly too
+-- (not just through the function) so `for name in pairs(nyaa.palettes) do`
+-- or `nyaa.palettes.nord.mauve` both work, matching every reference to
+-- "nyaa.palettes" already made above and in palettes.lua/export.lua's own
+-- header comments. nyaa.palette(name) stays the preferred call for a
+-- single known-name lookup -- it validates the name and raises a readable
+-- error listing every known flavor on a typo, which indexing the table
+-- directly won't do -- but enumeration has nowhere else to live.
+nyaa.palettes = palettes
+
 -- Only the color pair a palette actually owns. Add more presets here
 -- freely -- each is just border_color_active/inactive, nothing more,
 -- since that's all uwuwm has a color setting for today. Kept exactly as
