@@ -94,6 +94,18 @@ void XdgToplevel::handleMap() {
                       state.min_height == state.max_height;
     is_floating     = xdg_toplevel->parent != nullptr || fixed_size;
 
+    wlr_log(WLR_DEBUG,
+            "[uwuwm xdg] handleMap title='%s' parent=%p min=%dx%d "
+            "max=%dx%d fixed_size=%d -> is_floating=%d",
+            xdg_toplevel->title ? xdg_toplevel->title : "?",
+            (void*)xdg_toplevel->parent,
+            state.min_width,
+            state.min_height,
+            state.max_width,
+            state.max_height,
+            fixed_size,
+            is_floating);
+
     if(xdg_toplevel->title) { title = xdg_toplevel->title; }
     if(xdg_toplevel->app_id) { app_id = xdg_toplevel->app_id; }
 
@@ -208,6 +220,50 @@ void XdgToplevel::handleCommit(wlr_surface* /*surface*/) {
     // independent of any resize we initiated, so re-check every time
     // rather than only on initial_commit.
     const wlr_box& client_geo = xdg_toplevel->base->geometry;
+
+    // client_geo (xdg_surface.set_window_geometry) is what Firefox
+    // *declares* as its visible rectangle -- everything above and in
+    // previous rounds has assumed that's an accurate description of what
+    // actually landed in its wl_surface buffer. That's never been
+    // directly checked. surface->current.width/height is the real,
+    // already-scale-normalized (surface-local) size of the buffer Firefox
+    // actually committed; surface->current.scale is the buffer_scale it
+    // used. If these disagree with client_geo in a way that tracks the
+    // output's scale factor, the mismatch is a HiDPI/buffer_scale
+    // conversion bug, not a resize-negotiation problem -- which would
+    // explain content rendering wider than the tile even though every
+    // negotiated *number* checks out, since the clip is being computed
+    // in one coordinate space while the client painted in another.
+    int surf_w     = xdg_toplevel->base->surface->current.width;
+    int surf_h     = xdg_toplevel->base->surface->current.height;
+    int buf_w      = xdg_toplevel->base->surface->current.buffer_width;
+    int buf_h      = xdg_toplevel->base->surface->current.buffer_height;
+    int surf_scale = xdg_toplevel->base->surface->current.scale;
+    int out_scale =
+        output ? static_cast<int>(output->wlr_output->scale * 100) : -1;
+
+    wlr_log(WLR_DEBUG,
+            "[uwuwm xdg] commit title='%s' geo(tile)=%dx%d client_geo=%d,%d "
+            "%dx%d surface_current=%dx%d raw_buffer=%dx%d surface_scale=%d "
+            "output_scale=%d%% prev_recorded=%d,%d %dx%d",
+            title.c_str(),
+            geo.width,
+            geo.height,
+            client_geo.x,
+            client_geo.y,
+            client_geo.width,
+            client_geo.height,
+            surf_w,
+            surf_h,
+            buf_w,
+            buf_h,
+            surf_scale,
+            out_scale,
+            content_offset_x,
+            content_offset_y,
+            content_clip_w,
+            content_clip_h);
+
     if(client_geo.x != content_offset_x || client_geo.y != content_offset_y ||
        client_geo.width != content_clip_w ||
        client_geo.height != content_clip_h) {
@@ -217,25 +273,130 @@ void XdgToplevel::handleCommit(wlr_surface* /*surface*/) {
         content_clip_h   = client_geo.height;
         applyBoxToScene(geo);
     }
+
+    // Force convergence on the tile's actual rect instead of accepting
+    // whatever the client settles on. xdg-shell's configure size is a
+    // hint the client is allowed to ignore or renegotiate away from
+    // (min-size floors, its own layout constraints, a debounced resize
+    // path, whatever) -- ack_configure only promises "I've applied state
+    // up to this serial," not "I used the size you asked for." kitty and
+    // wezterm never diverge here because a terminal's grid resize is
+    // trivial and instant; Firefox is the routine offender because its
+    // layout engine can decide -- even after acking -- to keep rendering
+    // at a size that isn't the one requested. Re-issuing the same
+    // request in that case isn't a race we're waiting out, it's a
+    // negotiation we need to keep winning: keep re-asking on every commit
+    // where the sizes disagree, gated only by whether a configure is
+    // currently in flight (checked via wlroots' own serial bookkeeping,
+    // not a flag we maintain ourselves) so this can't turn into a flood.
+    if(mapped && !unmanaged && !is_floating) {
+        int b          = server.lua_cfg.settings.border_px;
+        int expected_w = std::max(1, geo.width - 2 * b);
+        int expected_h = std::max(1, geo.height - 2 * b);
+        int min_w      = xdg_toplevel->current.min_width;
+        int min_h      = xdg_toplevel->current.min_height;
+        if(min_w > 0) { expected_w = std::max(expected_w, min_w); }
+        if(min_h > 0) { expected_h = std::max(expected_h, min_h); }
+
+        // client_geo.width/height IS already the content size -- proven
+        // by log, not assumed (see configureBackend): requesting a
+        // content size with wlr_xdg_toplevel_set_size gets back a
+        // client_geo.width/height that matches it exactly, while the
+        // client pads its own raw surface buffer with its own shadow on
+        // top independently. No conversion needed here; comparing
+        // client_geo directly against expected_w/h is the correct,
+        // apples-to-apples comparison. (An earlier version of this
+        // subtracted 2*content_offset before comparing, on the wrong
+        // assumption that client_geo was the full buffer size -- that
+        // made this comparison permanently, spuriously fail every
+        // commit, which combined with configureBackend's now-removed
+        // double-padding to spiral the buffer size upward instead of
+        // converging.)
+        bool configure_in_flight = xdg_toplevel->base->scheduled_serial !=
+                                   xdg_toplevel->base->current.configure_serial;
+        bool size_matches =
+            client_geo.width == expected_w && client_geo.height == expected_h;
+
+        if(!size_matches && !configure_in_flight) {
+            wlr_log(WLR_DEBUG,
+                    "[uwuwm xdg] commit title='%s' size mismatch after ack "
+                    "(client=%dx%d want=%dx%d) -- re-asserting configure",
+                    title.c_str(),
+                    client_geo.width,
+                    client_geo.height,
+                    expected_w,
+                    expected_h);
+            configureBackend(geo);
+        }
+    }
 }
 
 void XdgToplevel::configureBackend(const wlr_box& box) {
     int b = server.lua_cfg.settings.border_px;
-    // CSD clients (Firefox, Zen, anything GTK/Qt) declare their visible
-    // chrome rect via xdg_surface.set_window_geometry with a non-zero
-    // x/y for the CSD drop-shadow band. The buffer they allocate needs
-    // to be (chrome + 2*shadow) -- send the larger size so the buffer
-    // fits both the chrome and the shadow the client will draw around
-    // it. Same role XWaylandView::configureBackend plays with
-    // _GTK_FRAME_EXTENTS; XDG has no separate right/bottom extents, so
-    // symmetric-shadow assumption (every GTK/Qt CSD client in practice).
-    // First call (from handleMap via layout::arrange) has
-    // content_offset_x/y == 0, so this degrades to the plain content
-    // size; the client's first commit then declares the real geometry
-    // and handleCommit updates content_offset_x/y for subsequent
-    // configures.
-    int w = box.width  - 2 * b + 2 * content_offset_x;
-    int h = box.height - 2 * b + 2 * content_offset_y;
+    // wlr_xdg_toplevel_set_size requests a CONTENT size -- no shadow
+    // compensation needed here. Proven by log, not assumed: requesting
+    // 1900 (raw, before content_offset was even known) got back
+    // client_geo.width == 1900 exactly, while the client's own raw
+    // surface buffer came back at 1952 (1900 + 2*26, its own CSD shadow
+    // padded on *top* of what we asked for). GTK/Gecko clients allocate
+    // their own shadow margin around whatever content size they're
+    // given; they don't expect the compositor to pre-pad the request.
+    // The previous version of this function added 2*content_offset here
+    // to "compensate" for the shadow -- since the client was already
+    // adding its own shadow independently, that was double-counting:
+    // each re-assert compounded another 52px onto the buffer instead of
+    // converging (see handleCommit's log around the "size mismatch"
+    // case, where requesting 1952 got a 2004-wide buffer back). Request
+    // content size, plain and simple; content_offset_x/y is only needed
+    // as the clip's origin (see contentClipBox) to skip past whatever
+    // shadow the client independently decided to add.
+    int w = box.width - 2 * b;
+    int h = box.height - 2 * b;
+
+    // xdg-shell's suggested size is a hint the client is free to ignore,
+    // and Firefox/Zen's chrome genuinely can't render below some minimum
+    // (toolbar + tab strip + hamburger + window controls all need room).
+    // A client that declares that minimum via xdg_toplevel min_width/
+    // min_height and gets asked for less anyway just renders at its own
+    // minimum instead -- wider than the tile, wider than what
+    // contentClipBox (which always hard-clips to the tile's own width)
+    // will show. That mismatch is exactly what produces a hard-edge
+    // cutoff through live chrome: we ask for a size the client can't
+    // honor, then clip to the size we asked for instead of the size it
+    // actually used. Clamp our own request up to the declared floor so
+    // request and clip stay in agreement -- see contentClipBox for the
+    // matching clamp on the other side.
+    int min_w = xdg_toplevel->current.min_width;
+    int min_h = xdg_toplevel->current.min_height;
+    if(min_w > 0 && w < min_w) {
+        wlr_log(WLR_DEBUG,
+                "[uwuwm xdg] configureBackend title='%s' tile too narrow: "
+                "wanted w=%d, client min_width=%d -- clamping up",
+                title.c_str(),
+                w,
+                min_w);
+        w = min_w;
+    }
+    if(min_h > 0 && h < min_h) {
+        wlr_log(WLR_DEBUG,
+                "[uwuwm xdg] configureBackend title='%s' tile too short: "
+                "wanted h=%d, client min_height=%d -- clamping up",
+                title.c_str(),
+                h,
+                min_h);
+        h = min_h;
+    }
+
+    wlr_log(WLR_DEBUG,
+            "[uwuwm xdg] configureBackend title='%s' target_box=%dx%d "
+            "min=%dx%d -> requested_content_size=%dx%d",
+            title.c_str(),
+            box.width,
+            box.height,
+            min_w,
+            min_h,
+            std::max(1, w),
+            std::max(1, h));
     wlr_xdg_toplevel_set_size(xdg_toplevel, std::max(1, w), std::max(1, h));
 }
 
@@ -243,38 +404,67 @@ void XdgToplevel::activateBackend(bool activated) {
     wlr_xdg_toplevel_set_activated(xdg_toplevel, activated);
 }
 
-// The clip's width/height are in surface coordinates and end up
-// determining the buffer's drawn size in scene space
-// (subprojects/wlroots/types/scene/surface.c:130-131 +
-// wlr_scene_buffer_set_dest_size) -- not just the source-box crop. If
-// we return the raw xdg_toplevel->base->geometry, a client that
-// allocated a buffer larger than what we asked for via
-// wlr_xdg_toplevel_set_size (Firefox/Zen are the routine offenders:
-// they pick a buffer scale that ends up larger than the suggested
-// size, and the suggested size is itself only a hint per xdg-shell)
-// ends up drawing that oversized buffer in scene space, bleeding far
-// past the tile's actual content area. Same problem at a smaller
-// magnitude when geometry is the wlroots-reported-zero fallback:
-// View::applyBoxToScene sees clip.width == 0, passes nullptr, and
-// disables clipping entirely. Gecko-based clients hit BOTH of
-// these in sequence -- they're slow to call set_window_geometry at
-// all (the zero case), and even after they do, the geometry they
-// declare can be larger than the tile because their buffer scale
-// isn't 1:1 with the suggested size. Mirror
-// XWaylandView::contentClipBox's pattern: use the client's declared
-// geometry.x/y (the CSD-shadow offset) as the clip origin -- the
-// xdg_shell.c auto-shift of the inner surface_tree by
-// (-geometry.x, -geometry.y) plus the buffer's auto-position at
-// (clip.x, clip.y) of that inner tree makes the visible chrome land
-// at content_tree's (0, 0) -- but pin the clip's width/height to
-// the tile's own content area (border-inset box) regardless of how
-// large the surface buffer actually is. The `w > 0` clamp is
-// XWaylandView's, kept for the degenerate tile case.
+// contentClipBox hard-clips to the tile's own content box (border-inset
+// target width/height) regardless of what size the client's surface
+// buffer actually is. This is deliberate, not a fallback: GTK/Gecko
+// clients (Firefox, Zen) allocate their own buffer around whatever
+// content size they're given, padded with their own CSD shadow margin --
+// confirmed directly by log, not assumed (see configureBackend). We
+// don't need to know or care how big that padded buffer ends up being;
+// pinning the clip to the target size is what keeps it from ever
+// bleeding past the tile no matter what the client's buffer looks like.
+// (wlr_scene_subsurface_tree_set_clip does a pure source-box crop --
+// verified directly against wlroots' subsurface_tree.c -- there's no
+// destination-size scaling involved, so this clip can only shrink what's
+// visible, never stretch it.)
+//
+// geometry.x/y (the client's declared CSD shadow offset) is still needed
+// as the clip's *origin*: wlr_scene_xdg_surface_create's internal
+// auto-shift of the inner surface tree by (-geometry.x, -geometry.y),
+// combined with this clip's (x, y) being interpreted in that same
+// already-shifted tree's local space, is what lands the client's real
+// visible chrome at content_tree's (0, 0) -- verified against
+// xdg_shell.c and subsurface_tree.c directly, not assumed. The `w > 0`
+// guard covers the degenerate zero-geometry case before a client's
+// first set_window_geometry call.
 wlr_box XdgToplevel::contentClipBox(const wlr_box& box) const {
     const wlr_box& g = xdg_toplevel->base->geometry;
-    int b = server.lua_cfg.settings.border_px;
-    int w = box.width  - 2 * b;
-    int h = box.height - 2 * b;
+    int            b = server.lua_cfg.settings.border_px;
+    int            w = box.width - 2 * b;
+    int            h = box.height - 2 * b;
+
+    // Mirror configureBackend's min-size floor: if the tile is narrower
+    // than the client's declared xdg_toplevel min_width/min_height, we
+    // already asked the client to render at that larger minimum instead
+    // of the tile's own size (see configureBackend). Clipping to the
+    // tile's own (too-small) width here regardless would crop straight
+    // through the chrome that request just told the client it's allowed
+    // to draw -- request and clip have to agree on the floor, not just
+    // the common case. min_width/min_height are already content-space
+    // (xdg-shell defines them as the toplevel's content size, same units
+    // wlr_xdg_toplevel_set_size takes) -- no shadow conversion needed,
+    // same as configureBackend's request no longer needs one.
+    int min_w = xdg_toplevel->current.min_width;
+    int min_h = xdg_toplevel->current.min_height;
+    if(min_w > 0) { w = std::max(w, min_w); }
+    if(min_h > 0) { h = std::max(h, min_h); }
+
+    wlr_log(WLR_DEBUG,
+            "[uwuwm xdg] clip title='%s' box=%dx%d client_geo=%d,%d %dx%d "
+            "min=%dx%d -> clip=%d,%d %dx%d",
+            title.c_str(),
+            box.width,
+            box.height,
+            g.x,
+            g.y,
+            g.width,
+            g.height,
+            min_w,
+            min_h,
+            g.x,
+            g.y,
+            w > 0 ? w : 0,
+            h > 0 ? h : 0);
     return wlr_box{g.x, g.y, w > 0 ? w : 0, h > 0 ? h : 0};
 }
 

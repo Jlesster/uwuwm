@@ -83,6 +83,33 @@ void View::applyBoxToScene(const wlr_box& box) {
         wlr_box* clip =
             (clip_box.width > 0 && clip_box.height > 0) ? &clip_box : nullptr;
         wlr_scene_subsurface_tree_set_clip(&content_tree->node, clip);
+
+        // Both reference compositors (dwl's mapnotify, somewm's
+        // window.c createnotify) create the client's content tree
+        // *before* the border rects, so borders always land as the
+        // last (topmost-z) children under the view's scene_tree. We
+        // can't match that ordering at construction time the same way
+        // -- XWaylandView defers content_tree's creation to
+        // handleAssociate (it needs a real wl_surface, which doesn't
+        // exist yet in the constructor), well after border_tree and
+        // border_rects already exist as scene_tree's first children --
+        // so re-assert it here instead, on every geometry update. This
+        // is the missing half of the existing hard-clip strategy: the
+        // clip above is only ever as precise as the client's actual
+        // committed buffer size, and Gecko-based Xwayland clients
+        // (Firefox, Zen, Chrome) routinely commit a buffer that
+        // transiently lags or overshoots the tile we just configured
+        // them to, especially in the frame(s) right after a layout
+        // recompute. With content stacked over the border (the
+        // ordering bug this fixes), that overshoot painted right over
+        // the border and past the tile's right edge -- exactly where
+        // a Gecko toplevel's own window-control/hamburger-menu chrome
+        // lives -- instead of being hidden beneath it. Raising
+        // border_tree back to the top of scene_tree's children on
+        // every applyBoxToScene call makes the border reliably occlude
+        // any such overshoot again, self-healing regardless of
+        // construction-time ordering or any later reparenting.
+        wlr_scene_node_raise_to_top(&border_tree->node);
     }
 
     int w = box.width, h = box.height;

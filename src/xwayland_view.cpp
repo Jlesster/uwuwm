@@ -195,8 +195,8 @@ void XWaylandView::handleAssociate() {
     // render is already correctly positioned flush against the inside
     // of the border.
     int border_px = server.lua_cfg.settings.border_px;
-    content_tree = wlr_scene_subsurface_tree_create(
-        scene_tree, xsurface->surface);
+    content_tree =
+        wlr_scene_subsurface_tree_create(scene_tree, xsurface->surface);
     wlr_scene_node_set_position(&content_tree->node, border_px, border_px);
     surface_commit.connect(&xsurface->surface->events.commit,
                            [this](void*) { handleSurfaceCommit(); });
@@ -211,14 +211,107 @@ void XWaylandView::handleDissociate() {
 void XWaylandView::handleSurfaceCommit() {
     if(!mapped || unmanaged) { return; }
 
+    // Clip/position/borders are cheap and idempotent, so these are always
+    // re-applied against the current target box regardless of whether the
+    // client has caught up to it yet.
     applyBoxToScene(geo);
 
     if(is_floating) { return; }
 
-    int b = server.lua_cfg.settings.border_px;
+    // Re-check whether the tile is still wide enough for the client's
+    // declared WM_NORMAL_HINTS min. handleMap's "tile < min -> float"
+    // check fires before size_hints is reliably populated (X11 clients
+    // can set WM_NORMAL_HINTS after the window is mapped), so this
+    // re-check is the live coverage for the late-arriving-min case and
+    // for the case where a later layout change shrinks an already-tiled
+    // view's tile below its min. If we flip, drop the pending_configure
+    // flag -- we're no longer asking the client to fit the tile, and
+    // a stale pending wouldn't re-trigger another re-ask because the
+    // re-ask block below is gated on !pending_configure anyway, but
+    // clearing it keeps the state semantically clean for the
+    // re-float-into-tile path (handleMap, when re-tiled via
+    // setFloating(false), starts pending_configure=true again on the
+    // next configureBackend).
+    xcb_size_hints_t* sh = xsurface->size_hints;
+    if(sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE)) {
+        int b     = server.lua_cfg.settings.border_px;
+        int buf_w = geo.width - 2 * b;
+        int buf_h = geo.height - 2 * b;
+        int min_w = sh->min_width;
+        int min_h = sh->min_height;
+        if((min_w > 0 && buf_w < min_w) || (min_h > 0 && buf_h < min_h)) {
+            wlr_log(WLR_DEBUG,
+                    "[uwuwm xwl] commit title='%s' tile=%dx%d below min=%dx%d "
+                    "-- switching to floating at min",
+                    xsurface->title ? xsurface->title : "?",
+                    geo.width,
+                    geo.height,
+                    min_w,
+                    min_h);
+            is_floating = true;
+            int w = min_w > 0 ? min_w : 0;
+            int h = min_h > 0 ? min_h : 0;
+            wlr_box box  = centeredFloatBox(w, h);
+            floating_geo = box;
+            setGeometry(box);
+            if(output) { layout::arrange(*output); }
+            pending_configure = false;
+            return;
+        }
+    }
+
+    int b          = server.lua_cfg.settings.border_px;
     int expected_w = std::max(1, geo.width - 2 * b);
     int expected_h = std::max(1, geo.height - 2 * b);
-    if(xsurface->width != expected_w || xsurface->height != expected_h) {
+
+    // NOTE: xsurface->width/height are NOT the client's actual rendered
+    // size -- wlr_xwayland_surface_configure() (in configureBackend)
+    // writes them optimistically the instant *we* call it, before any
+    // round trip to the client at all. Comparing against them here always
+    // reads back our own last request, so it can never detect "still
+    // catching up" -- it looks acked the moment we ask, whether or not
+    // the client has actually redrawn. The real ack signal is the
+    // wl_surface's committed buffer size, which wlroots only updates when
+    // the client hands over an actual new frame:
+    int actual_w = xsurface->surface ? xsurface->surface->current.width : 0;
+    int actual_h = xsurface->surface ? xsurface->surface->current.height : 0;
+
+    wlr_log(WLR_DEBUG,
+            "[uwuwm xwl] commit title='%s' geo=%dx%d expected=%dx%d "
+            "xsurface_echo=%dx%d surface_current=%dx%d pending=%d",
+            xsurface->title ? xsurface->title : "?",
+            geo.width,
+            geo.height,
+            expected_w,
+            expected_h,
+            xsurface->width,
+            xsurface->height,
+            actual_w,
+            actual_h,
+            pending_configure);
+
+    if(actual_w == expected_w && actual_h == expected_h) {
+        // The client has genuinely rendered at the size we asked for.
+        pending_configure = false;
+        return;
+    }
+
+    // Only ask again if there isn't already an outstanding request for
+    // this same target. X11 has no ack_configure/serial handshake the way
+    // xdg-shell does, so nothing stops us from calling
+    // wlr_xwayland_surface_configure again on every single one of the many
+    // intermediate surface commits a client like Firefox, Chrome, or Zen
+    // produces while it's still laying out content for a resize -- and
+    // unconditionally doing so here never lets that layout settle on the
+    // width our clip actually enforces. Wayland clients don't show this
+    // because xdg-shell's configure/ack_configure handshake makes a
+    // second configure for the same size a no-op on their end; X11 has no
+    // such protection, so the compositor has to provide it. dwl gets away
+    // without this gate because it targets simpler clients; somewm added
+    // the same pending-request gate for the same reason (see its
+    // apply_geometry_to_wlroots).
+    if(!pending_configure) {
+        pending_configure = true;
         configureBackend(geo);
     }
 }
@@ -265,8 +358,54 @@ void XWaylandView::handleMap() {
 
     if(output) { layout::arrange(*output); }
 
+    // Mirror XdgToplevel::handleMap: resizable clients whose declared
+    // WM_NORMAL_HINTS min size is larger than the tile the layout just
+    // gave us should be floated, not tiled. ICCCM has no real-time
+    // min-floor mechanism the way xdg_toplevel state does, and the
+    // XWayland side of this file has no per-view min clamp in
+    // configureBackend/contentClipBox (deliberately, per the long
+    // comment at contentClipBox's definition) -- the only practical
+    // response to "tile < client min" is to take the view out of
+    // tiling entirely. handleSurfaceCommit re-runs the same check on
+    // every commit for the cases handleMap can't see (size_hints
+    // populated late, later layout change shrinks the tile, etc.).
+    bool float_for_min = false;
+    if(!is_floating && output) {
+        xcb_size_hints_t* sh = xsurface->size_hints;
+        if(sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE)) {
+            int b     = server.lua_cfg.settings.border_px;
+            int buf_w = geo.width - 2 * b;
+            int buf_h = geo.height - 2 * b;
+            int min_w = sh->min_width;
+            int min_h = sh->min_height;
+            if((min_w > 0 && buf_w < min_w) ||
+               (min_h > 0 && buf_h < min_h)) {
+                is_floating   = true;
+                float_for_min = true;
+                // Drop our tile reservation now that we're floating.
+                layout::arrange(*output);
+            }
+        }
+    }
+
     if(is_floating && output) {
-        wlr_box box  = centeredFloatBox(xsurface->width, xsurface->height);
+        int w, h;
+        if(float_for_min) {
+            // Size the float at the ICCCM min floor that triggered the
+            // flip -- same shape as XdgToplevel::handleMap's
+            // float_for_min branch.
+            xcb_size_hints_t* sh = xsurface->size_hints;
+            w                    = (sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE))
+                                      ? sh->min_width
+                                      : 0;
+            h                    = (sh && (sh->flags & XCB_ICCCM_SIZE_HINT_P_MIN_SIZE))
+                                      ? sh->min_height
+                                      : 0;
+        } else {
+            w = xsurface->width;
+            h = xsurface->height;
+        }
+        wlr_box box  = centeredFloatBox(w, h);
         floating_geo = box;
         setGeometry(box);
     }
@@ -387,24 +526,60 @@ void XWaylandView::handleSetClass() {
 }
 
 // X11 has no xdg_surface-style client-declared window geometry, so the
-// clip is unconditionally the tile's border-inset content box, expressed
-// in the X window's local coordinate space (the API in
+// clip is normally the tile's border-inset content box, expressed in the
+// X window's local coordinate space (the API in
 // subprojects/wlroots/types/scene/subsurface_tree.c sets a source-box
 // crop on the surface buffer in surface space). dwl, the mature
 // reference wlroots compositor, takes exactly this same approach:
-// hard-clip every XWayland client to its tile's content box on every
-// commit, no CSD-shadow compensation. Any client whose surface buffer
-// lags behind or overshoots the size we configured it to -- Firefox,
-// Zen, and other Gecko-based X11 clients are routine offenders here --
-// gets cropped at the chrome boundary instead of bleeding past the
-// border. (Previously this code fetched _GTK_FRAME_EXTENTS and slid
-// content_tree by the CSD shadow size; that complexity was solving a
-// problem that mostly doesn't apply -- most X11 GTK/Gecko builds run
-// SSD by default, so the property is typically 0 anyway.)
+// hard-clip every XWayland client to its tile's content box, no
+// CSD-shadow compensation. (Previously this code fetched
+// _GTK_FRAME_EXTENTS and slid content_tree by the CSD shadow size; that
+// complexity was solving a problem that mostly doesn't apply -- most X11
+// GTK/Gecko builds run SSD by default, so the property is typically 0
+// anyway.)
+//
+// One thing we deliberately do NOT copy from a naive hard-clip: clipping
+// tighter than the client's actual current buffer the instant a relayout
+// (client added/removed, tag switch, master-factor change, ...) hands
+// this view a smaller target. Firefox, Chrome, and Zen resize
+// asynchronously across several surface commits -- their layout engine
+// needs a few frames to relayout the toolbar/tab strip before it commits
+// a buffer that actually matches the size we just asked for (see
+// handleSurfaceCommit's pending_configure gate for the send-side half of
+// this). If we hard-clip to the *target* box the moment arrange() runs,
+// that transient window crops straight through whatever's still drawn
+// at the old, wider layout -- the hamburger menu and window controls
+// sitting past the tile's new right edge but still inside the client's
+// not-yet-shrunk buffer. Clamping the clip to max(target, client's
+// current committed size) means a shrink instead briefly bleeds content
+// past the border -- a minor cosmetic blip -- until the client catches
+// up and commits at the smaller size, at which point this naturally
+// tightens back down with no extra bookkeeping. Growing a tile is
+// unaffected: the target is already the larger of the two.
 wlr_box XWaylandView::contentClipBox(const wlr_box& box) const {
-    int b = server.lua_cfg.settings.border_px;
-    int w = box.width - 2 * b;
-    int h = box.height - 2 * b;
+    int b        = server.lua_cfg.settings.border_px;
+    int w        = box.width - 2 * b;
+    int h        = box.height - 2 * b;
+    int target_w = w, target_h = h;
+    if(mapped && !unmanaged && xsurface->surface) {
+        // Same caveat as handleSurfaceCommit: xsurface->width/height are
+        // our own last request echoed back, not what the client has
+        // actually drawn, so they're useless here -- clamping against
+        // them is a no-op since configureBackend() just set them to this
+        // same target a moment ago. current.width/height is the real
+        // committed buffer.
+        w = std::max(w, static_cast<int>(xsurface->surface->current.width));
+        h = std::max(h, static_cast<int>(xsurface->surface->current.height));
+    }
+    if(mapped && !unmanaged && (w != target_w || h != target_h)) {
+        wlr_log(WLR_DEBUG,
+                "[uwuwm xwl] clip title='%s' target=%dx%d clamped_to=%dx%d",
+                xsurface->title ? xsurface->title : "?",
+                target_w,
+                target_h,
+                w,
+                h);
+    }
     return wlr_box{0, 0, w > 0 ? w : 0, h > 0 ? h : 0};
 }
 
@@ -414,11 +589,31 @@ void XWaylandView::configureBackend(const wlr_box& box) {
     int vh = box.height - 2 * b;
     if(vw < 1) { vw = 1; }
     if(vh < 1) { vh = 1; }
+    wlr_log(WLR_DEBUG,
+            "[uwuwm xwl] configureBackend title='%s' target_box=%d,%d "
+            "%dx%d -> sent xcb %d,%d %dx%d (border=%d)",
+            xsurface->title ? xsurface->title : "?",
+            box.x,
+            box.y,
+            box.width,
+            box.height,
+            box.x + b,
+            box.y + b,
+            vw,
+            vh,
+            b);
     wlr_xwayland_surface_configure(xsurface,
                                    static_cast<int16_t>(box.x + b),
                                    static_cast<int16_t>(box.y + b),
                                    static_cast<uint16_t>(vw),
                                    static_cast<uint16_t>(vh));
+    // Every caller -- setGeometry (layout rearrange, float, fullscreen,
+    // animation end), handleRequestConfigure's tiled reassert, and
+    // handleSurfaceCommit's own gated resend below -- lands here, so this
+    // is the one place that needs to mark a request outstanding.
+    // handleSurfaceCommit clears it once the client's committed size
+    // matches; until then it won't call this again for the same target.
+    pending_configure = true;
 }
 
 void XWaylandView::activateBackend(bool activated) {

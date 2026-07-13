@@ -79,6 +79,13 @@ private:
     void handleSetTitle();
     void handleSetClass();
 
+    // Set whenever configureBackend() sends the client a
+    // wlr_xwayland_surface_configure, cleared once a subsequent surface
+    // commit reports the size we asked for. handleSurfaceCommit consults
+    // this before re-issuing a configure for the same target box -- see
+    // its definition for why the gate matters.
+    bool pending_configure = false;
+
     VoidListener                                   associate;
     VoidListener                                   dissociate;
     VoidListener                                   surface_commit;
