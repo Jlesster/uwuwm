@@ -49,7 +49,105 @@
 --                     colors and everything nyaa.export.* generates for
 --                     the rest of your desktop can never drift apart.
 
+---@class nyaa.Theme
+---Argument shape for `nyaa.wear(theme)`. `preset` and `flavor` are
+---mutually exclusive; either seeds the border colors (and, for `flavor`,
+---`background_color` from the flavor's `base`) before any of the visual
+---field overrides are applied. `wallpaper` / `wallpaper_opts` are
+---stripped out before the uwu.visual.set pass and handed to
+---`nyaa.wallpaper.set()` last, so the flavor's background color is
+---already the fallback underneath if swaybg is missing or the image
+---path is bad. The other fields are passed through to `uwu.visual.set()`
+---field-by-field.
+---@field preset? string   Preset name (see `nyaa.presets`).
+---@field flavor? string   Flavor name (see `nyaa.palettes`). Mutually exclusive with `preset`.
+---@field gap? integer
+---@field border_width? integer
+---@field cursor_size? integer
+---@field cursor_theme? string
+---@field border_color_active? string
+---@field border_color_inactive? string
+---@field background_color? string
+---@field inactive_opacity? number
+---@field wallpaper? string  Image path; a leading "~" expands to $HOME.
+---@field wallpaper_opts? { mode?: "fill"|"fit"|"stretch"|"center"|"tile", output?: string }
+
+---@class nyaa.Worn
+---`nyaa.worn()`'s return / the table `nyaa.wear()` hands back -- a flat
+---record of the eight *visual* settings uwu.visual.set accepts (plus
+---`wallpaper`, when `nyaa.wear({ wallpaper = ... })` was the path that
+---set it), as last applied. Anything not set stays nil.
+---@field gap? integer
+---@field border_width? integer
+---@field cursor_size? integer
+---@field cursor_theme? string
+---@field border_color_active? string
+---@field border_color_inactive? string
+---@field background_color? string
+---@field inactive_opacity? number
+---@field wallpaper? nyaa.WallpaperEntry
+
+---@class nyaa.PresetEntry
+---@field border_color_active string
+---@field border_color_inactive string
+
+---@class nyaa.RuleWhen
+---Per-client match shape used by `nyaa.rule({ when = ... })`. Same
+---shape as `paw.RuleWhen` -- they're both sugar over `uwu.rule()`'s
+---`match` field. `app_id`/`title` may be exact strings or a `paw.like`
+---pattern (uwuwm's own "~" prefix convention); `floating` matches
+---against the state uwuwm already auto-detected before the rule runs.
+---@field app_id? string
+---@field title? string
+---@field floating? boolean
+
+---@class nyaa.RuleSet
+---Per-client apply shape used by `nyaa.rule({ ... })`. Only appearance
+---fields -- not the layout/state fields `paw.RuleSet` covers. The
+---appearance fields (border colors, opacity) here are *client* overrides;
+---`background_color` is global-only and intentionally not in this set.
+---@field preset? string   Preset name (see `nyaa.presets`). Mutually exclusive with `flavor`.
+---@field flavor? string   Flavor name (see `nyaa.palettes`). Mutually exclusive with `preset`.
+---@field border_color_active? string
+---@field border_color_inactive? string
+---@field opacity? number  0.0-1.0; only applies while the client is unfocused.
+
 local palettes = require('nyaa.palettes')
+
+---@class nyaa
+---uwuwm's theming module -- appearance only. `nyaa.wear()` is the main
+---entry point (pushes a `nyaa.Theme` into uwu.visual.set), `nyaa.worn()`
+---reads the live values back, `nyaa.rule()` is per-client border/opacity
+---theming sugar over `uwu.rule()`, and `nyaa.palette(name)` resolves a
+---flavor name to its 26-role table for any other code that wants one
+---(`nyaa.export.*` and your own rc.lua included). The two color tables
+---the user can pick from: `nyaa.presets` (just the two border colors
+---uwuwm itself can draw with) and `nyaa.palettes` (the full 26-role
+---set, same source `nyaa.wear({ flavor = ... })` derives
+---background_color and the active border from). `nyaa.export` and
+---`nyaa.wallpaper` are sub-modules.
+---@field presets table<string, nyaa.PresetEntry>  Border-color pair per preset name.
+---@field palettes nyaa.Palettes  Full 26-role palette per flavor name.
+---@field export nyaa.export  See `lib/nyaa/export.lua`.
+---@field wallpaper nyaa.wallpaper  See `lib/nyaa/wallpaper.lua`.
+
+---@class nyaa.export
+---Renders the same palette `nyaa.wear()`/`nyaa.palette()` use into
+---config snippets for the rest of your desktop (GTK, kitty, foot,
+---waybar, dunst, wezterm, fuzzel). See `lib/nyaa/export.lua`.
+---@field targets table<string, nyaa.ExportTarget>
+---@field render fun(target: string, palette: string|nyaa.Palette): string
+---@field write fun(target: string, path: string, palette: string|nyaa.Palette): true, string?
+---@field write_all fun(dir: string, palette: string|nyaa.Palette, only?: string[]): table<string, true>, table<string, string>
+
+---@class nyaa.wallpaper
+---Tracks the external swaybg client uwuwm delegates its wallpaper to
+---(see the header on `lib/nyaa/wallpaper.lua`). `nyaa.wear({ wallpaper =
+---... })` calls `nyaa.wallpaper.set()` for you; use this directly only
+---when you want to swap the wallpaper without going through `nyaa.wear`.
+---@field set fun(path: string, opts?: { mode?: "fill"|"fit"|"stretch"|"center"|"tile", output?: string }): nyaa.WallpaperEntry?
+---@field clear fun(output?: string)
+---@field current fun(): table<string, nyaa.WallpaperEntry>
 
 local nyaa = {}
 
@@ -186,6 +284,8 @@ end
 -- the two colors a preset gives you: nyaa.export.render(), a status-bar
 -- module, or just picking a role by name in your own rc.lua
 -- (nyaa.palette("catppuccin_mocha").teal, say).
+---@param name string  Flavor name -- one of the keys in `nyaa.palettes`.
+---@return nyaa.Palette
 function nyaa.palette(name)
   local p = palettes[name]
   if not p then
@@ -211,6 +311,8 @@ end
 -- `nyaa.wear({...}).gap` without a second lookup. `wallpaper`/
 -- `wallpaper_opts` are pulled out before that field-by-field pass (see
 -- below) since neither is a real uwu.set() field.
+---@param theme? nyaa.Theme
+---@return nyaa.Worn
 function nyaa.wear(theme)
   theme = theme or {}
   if theme.preset and theme.flavor then
@@ -280,6 +382,7 @@ end
 -- nyaa.worn() -- reads the eight visual settings back out of
 -- uwu.visual.get(), as one table. Handy for a status-bar module, or just
 -- `print`ing to sanity-check what actually landed after nyaa.wear().
+---@return nyaa.Worn
 function nyaa.worn()
   local current = {}
   for name in pairs(VISUAL_FIELDS) do
@@ -306,6 +409,8 @@ end
 -- nyaa.rule({ when = { app_id = "mpv" }, opacity = 0.85 }) -- e.g. a
 -- picture-in-picture player that should stay slightly see-through
 -- whenever it's not focused.
+---@param spec { when?: nyaa.RuleWhen, preset?: string, flavor?: string, border_color_active?: string, border_color_inactive?: string, opacity?: number }
+---@return integer  Hook id (same as `uwu.hook()`'s return; pass to `uwu.unhook()` to remove).
 function nyaa.rule(spec)
   spec = spec or {}
   if spec.preset and spec.flavor then

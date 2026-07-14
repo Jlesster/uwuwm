@@ -24,6 +24,47 @@
 -- ("base" is the nearest analog to a terminal/background color;
 -- "crust" is the darkest surface, "text" the primary foreground.)
 
+---@class nyaa.Palette
+---A 26-role color table, one per `nyaa.palettes` flavor. Every field is
+---a "#rrggbb" string (no alpha); the wider 26-role shape (accents + text
+---ramp + surface ramp) is what makes the same table useful both as the
+---palette a *theme engine* reads (nyaa.export.*, status bars, ...) and as
+---the seed for uwuwm's own two border colors + background_color when
+---`nyaa.wear({ flavor = ... })` is called. Field names match Catppuccin's
+---own canonical role spec verbatim, even for the non-Catppuccin flavors
+---(gruvbox/nord/everforest), which are best-effort mappings onto the
+---same 26 names -- see the per-table notes below for which roles were
+---hand-assigned vs. pulled from a project's own spec.
+---@field rosewater string
+---@field flamingo string
+---@field pink string
+---@field mauve string
+---@field red string
+---@field maroon string
+---@field peach string
+---@field yellow string
+---@field green string
+---@field teal string
+---@field sky string
+---@field sapphire string
+---@field blue string
+---@field lavender string
+---@field text string
+---@field subtext1 string
+---@field subtext0 string
+---@field overlay2 string
+---@field overlay1 string
+---@field overlay0 string
+---@field surface2 string
+---@field surface1 string
+---@field surface0 string
+---@field base string
+---@field mantle string
+---@field crust string
+
+---@class nyaa.Palettes
+---@field [string] nyaa.Palette  Indexed by flavor name ("catppuccin_mocha", "nord", ...).
+
 local palettes = {}
 
 -- ── Catppuccin (canonical, exact upstream values) ───────────────────────
@@ -268,4 +309,5 @@ palettes.everforest = {
   crust = '#232a2e',
 }
 
+---@type nyaa.Palettes
 return palettes

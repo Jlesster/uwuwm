@@ -16,6 +16,14 @@
 -- (your own custom palette, or one hand-edited from a preset) works
 -- identically.
 
+---@class nyaa.ExportTarget
+---One entry in `nyaa.export.targets`. Each target knows how to turn a
+---resolved palette into a config snippet (`render`) and the default
+---basename `nyaa.export.write_all()` should use when writing one per
+---target into a shared directory.
+---@field render fun(palette: nyaa.Palette): string
+---@field filename string  Default basename -- `nyaa.export.write_all(dir, ...)` writes to `dir/filename`.
+
 local palettes_mod = require('nyaa.palettes')
 
 local export = {}
@@ -315,6 +323,7 @@ local function render_fuzzel(p)
 end
 
 -- name -> { render = fn(palette) -> string, filename = default basename }
+---@type table<string, nyaa.ExportTarget>
 export.targets = {
   gtk3 = { render = render_gtk_css, filename = 'gtk-3.0-colors.css' },
   gtk4 = { render = render_gtk_css, filename = 'gtk-4.0-colors.css' },
@@ -332,6 +341,9 @@ export.targets = {
 -- `palette` is either a name known to nyaa.palettes, or a raw role table
 -- (nyaa.palette()'s return shape) -- so a hand-tweaked copy works exactly
 -- like a preset name does.
+---@param target string  Target name -- one of the keys in `nyaa.export.targets`.
+---@param palette string|nyaa.Palette  Either a flavor name or a raw palette table.
+---@return string  Rendered config snippet.
 function export.render(target, palette)
   local t = export.targets[target]
   if not t then
@@ -358,6 +370,11 @@ end
 -- an error message on an io.open/write failure, same convention
 -- io.open() itself uses -- so `local ok, err = nyaa.export.write(...)`
 -- reads naturally in rc.lua without wrapping every call in pcall.
+---@param target string  Target name -- one of the keys in `nyaa.export.targets`.
+---@param path string  Output file path. Parent directory must already exist.
+---@param palette string|nyaa.Palette  Either a flavor name or a raw palette table.
+---@return true  On success.
+---@return string? err  Filesystem error message on `io.open`/`write` failure.
 function export.write(target, path, palette)
   local body = export.render(target, palette)
   local fh, err = io.open(path, 'w')
@@ -377,6 +394,11 @@ end
 -- hook or just once at the bottom of rc.lua after nyaa.wear(). Returns a
 -- table of { [target] = true|nil } and, for any that failed, a second
 -- table of { [target] = err }.
+---@param dir string  Directory to write every target's file into. Must already exist.
+---@param palette string|nyaa.Palette  Either a flavor name or a raw palette table.
+---@param only? string[]  Subset of target names to render; omit for all of `nyaa.export.targets`.
+---@return table<string, true> ok  Per-target success table -- `{ [target] = true }` for each one that wrote.
+---@return table<string, string> errors  Per-target error table -- `{ [target] = err }` for each one that failed.
 function export.write_all(dir, palette, only)
   local list = {}
   if only then

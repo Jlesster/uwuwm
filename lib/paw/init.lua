@@ -4,6 +4,136 @@
 -- shapes -- a list of keybinds, a client rule, a short-named hook, the
 -- tiling primitives, the behavior/app settings -- names and call shapes
 -- of their own instead of copying awful's).
+--
+-- ── data shapes ─────────────────────────────────────────────────────────
+
+---@class paw.KeySpec
+---A single `paw.keys()` entry. Positional: `[1]` is the modifier list,
+---`[2]` is the xkbcommon key name, `[3]` is the callback, `[4]` is an
+---optional human description (kept on `paw.keymap` for which-key-style
+---overlays; uwuwm itself doesn't read it).
+---@field [1] string[]
+---@field [2] string
+---@field [3] fun()
+---@field [4] string?
+
+---@class paw.KeymapEntry
+---Row stored in `paw.keymap` -- the read-back view of what was last
+---registered. Same as `paw.KeySpec` minus the callback.
+---@field mods string[]
+---@field key string
+---@field desc? string
+
+---@class paw.RuleWhen
+---Per-client match shape for `paw.rule({ when = ... })`. Only the three
+---fields `paw.rule` actually surfaces -- `uwu.rule()`'s own `match` is
+---slightly wider. `app_id`/`title` may be exact strings or a `paw.like`
+---pattern (uwuwm's own "~" prefix convention); `floating` matches
+---against the state uwuwm already auto-detected *before* this rule
+---runs, so a catch-all `{ floating = true }` rule parks dialogs/
+---file-pickers on the scratch tag without needing every app_id by hand.
+---@field app_id? string
+---@field title? string
+---@field floating? boolean
+
+---@class paw.RuleSet
+---Per-client apply shape for `paw.rule({ set = ... })`. Layout/state
+---fields only -- not the appearance fields `nyaa.RuleSet` covers. Pass
+---straight through to `uwu.rule()`'s `apply` underneath.
+---@field floating? boolean
+---@field fullscreen? boolean
+---@field tag? integer   1-based tag index.
+---@field output? string  Output name (see `uwu.monitor.list()`).
+
+---@class paw.SpecialWorkspaceDef
+---The table `paw.specialworkspace.set(name, opts)` takes. Any field
+---can be omitted: `match`-without-`spawn` is still legal (an unprompted
+---newly-mapped matching window is silently claimed-and-hidden rather
+---than revealed), and `size` defaults to half the focused output.
+---@field spawn? string  Shell command to launch if no instance is running yet.
+---@field match? { app_id?: string, title?: string }  How to recognize the resulting window.
+---@field size? { width: number, height: number }  Fractional (0-1) of the focused output's dimensions.
+
+---@class paw.layout
+---Sugar over `uwu.layout.*` -- the per-output tiling primitives your
+---keybinds call. All these used to be flat `uwu.set_layout()`/
+---`uwu.inc_master()`/`uwu.dwindle_*()` calls sitting directly in rc.lua
+---with no paw layer between them and a keybind; this is the paw layer.
+---@field set fun(name: "master"|"masterstack"|"master_stack"|"dwindle")
+---@field inc_master fun(delta: number)
+---@field dwindle paw.layout.dwindle
+
+---@class paw.layout.dwindle
+---The five dwindle-specific actions. No-op on an output currently in
+---master-stack mode.
+---@field toggle_split fun()
+---@field swap_split fun()
+---@field rotate_split fun(angle?: integer)
+---@field splitratio fun(ratio: number)
+---@field move_to_root fun(stable?: boolean)
+
+---@class paw.client
+---Sugar over the focused-client actions uwuwm exposes at the `uwu.*`
+---level (`uwu.focus_next`, `uwu.kill`, `uwu.toggle_floating`, etc.),
+---plus relative-delta `move`/`resize` shaped for Hyprland-style binds.
+---uwuwm's own client *lifecycle* (list/focused/kill) stays on
+---`uwu.client` -- paw.client is the workflow-shaped layer.
+---@field focus_next fun()
+---@field focus_prev fun()
+---@field toggle_floating fun()
+---@field toggle_fullscreen fun()
+---@field kill fun()
+---@field move fun(dx: integer, dy: integer)  No-op (not an error) with no focused client.
+---@field resize fun(dw: integer, dh: integer)  No-op (not an error) with no focused client.
+
+---@class paw.monitor
+---Workflow-shaped sugar over `uwu.monitor.*`: `focused` for the
+---currently-focused output's name, `each(fn)` for iterating every
+---connected output (the two things an rc.lua actually reaches for when
+---*reacting* to monitor state, as opposed to *configuring* it).
+---@field focused fun(): string?
+---@field each fun(fn: fun(m: uwu.MonitorInfo))
+
+---@class paw.workspace
+---Friendlier name for what the C side calls a "tag" (one flat, 9-bit
+---set of tags shared across every output -- Awesome/dwm-style, not a
+---per-monitor workspace list). Every action takes either a 1-based
+---integer or a name previously registered via `paw.workspace.names()`.
+---@field go fun(n: integer|string)
+---@field toggle fun(n: integer|string)
+---@field move_focused_to fun(n: integer|string)
+---@field close_all fun(n: integer|string)
+---@field current fun(output_name?: string): integer?  Raw tagset bitmask.
+---@field current_indices fun(output_name?: string): integer[]  Decoded 1-based list.
+---@field each fun(fn: fun(i: integer))  Alias of `paw.tags(fn)`.
+---@field on_change fun(fn: fun(monitor_name: string, new_tagset: integer)): integer  Hook id.
+
+---@class paw.specialworkspace
+---Hyprland-style named scratchpads: a floating window that toggles in
+---and out of view on top of whatever tag you're currently on, instead
+---of living on a fixed tag. Built on `client.minimized` +
+---`client:set_tags_mask(uwu.tag.current())` -- see the long header on
+---`lib/paw/init.lua` for the design.
+---@field set fun(name: string, opts?: paw.SpecialWorkspaceDef)
+---@field toggle fun(name: string)
+---@field show fun(name: string)
+---@field hide fun(name: string)
+---@field move_focused fun(name: string)
+
+---@class paw
+---Sugar over the raw `uwu` C API. Every function here is a thin
+---pass-through that gives the common shapes (a list of keybinds, a
+---client rule, a short-named hook, the tiling primitives, the
+---behavior/app settings) names and call shapes of their own instead
+---of copying awful's. paw never does anything a couple of lines of raw
+---uwu.* calls couldn't -- it's an ergonomics layer, not a different
+---compositor.
+---@field layout paw.layout
+---@field client paw.client
+---@field monitor paw.monitor
+---@field workspace paw.workspace
+---@field specialworkspace paw.specialworkspace
+---@field keymap paw.KeymapEntry[]  Read-back of what `paw.keys()` last registered.
 
 local paw = {}
 
@@ -48,6 +178,8 @@ local NYAA_OWNED_FIELDS = {
 -- Pushes each field straight through uwu.behavior.set(), and hands the
 -- table back so callers can do e.g.
 -- `local terminal = paw.defaults({...}).terminal` without a second lookup.
+---@param opts? { master_factor?: number, repeat_rate?: integer, repeat_delay?: integer, terminal?: string, launcher?: string, focus_follows_mouse?: boolean, dwindle_preserve_split?: boolean }
+---@return { [string]: any }  The merged table that was pushed into `uwu.behavior.set`.
 function paw.defaults(opts)
   opts = opts or {}
 
@@ -192,6 +324,7 @@ paw.client = {
 -- next to paw.keys() in the same table is expected, not a layering leak.
 paw.keymap = {}
 
+---@param specs paw.KeySpec[]
 function paw.keys(specs)
   for _, spec in ipairs(specs) do
     local mods, key, fn, desc = spec[1], spec[2], spec[3], spec[4]
@@ -210,6 +343,7 @@ end
 --     table.insert(keys, { mod, tostring(i), function() uwu.tag.view(i) end })
 --   end)
 --   paw.keys(keys)
+---@param fn fun(i: integer)  Called once per tag, 1..`uwu.tag_count`.
 function paw.tags(fn)
   for i = 1, uwu.tag_count do
     fn(i)
@@ -251,6 +385,8 @@ paw.monitor = {
 -- field namespace invites. Passes straight through to uwu.rule()'s own
 -- match/apply table underneath -- see l_rule_hook in lua_config.cpp for
 -- exactly what each field does.
+---@param spec? { when?: paw.RuleWhen, set?: paw.RuleSet }
+---@return integer  Hook id (same as `uwu.hook()`'s return; pass to `uwu.unhook()` to remove).
 function paw.rule(spec)
   spec = spec or {}
   local when, set = spec.when or {}, spec.set or {}
@@ -273,6 +409,8 @@ end
 -- prefix convention (see `matches` in l_rule_hook) so a rule reads as
 -- "match like this pattern" instead of a bare string with a leading
 -- sigil someone has to already know about.
+---@param pattern string  A Lua pattern (no leading "~").
+---@return string  `"~" .. pattern` -- pass directly to `paw.rule({ when = { app_id = ... } })`.
 function paw.like(pattern)
   return '~' .. pattern
 end
@@ -297,9 +435,13 @@ local EVENT_ALIASES = {
   monitor_disconnected = 'output::disconnect',
 }
 
+---@param event string  A short verb name (see `EVENT_ALIASES`) or a raw `"namespace::event"` string.
+---@param fn fun(...)  Callback; receives whatever the underlying event sends (a `uwu.Client` for client events, `(monitor_name, new_tagset)` for `tag::change`, etc).
+---@return integer  Hook id.
 function paw.on(event, fn)
   return uwu.hook(EVENT_ALIASES[event] or event, fn)
 end
+---@param id integer  Hook id returned by `paw.on`/`paw.rule`/`uwu.hook`.
 paw.off = uwu.unhook
 
 -- ── workspaces ───────────────────────────────────────────────────────────
@@ -379,12 +521,15 @@ paw.workspace = {
 -- anything that's already a number).
 local workspace_names = {}
 
+---@param map table<string, integer>  Map of human-readable name -> 1-based tag index. Merged into the existing table.
 function paw.workspace.names(map)
   for name, n in pairs(map or {}) do
     workspace_names[name] = n
   end
 end
 
+---@param n integer|string  A 1-based tag index, or a name previously registered via `paw.workspace.names()`.
+---@return integer  Resolved 1-based tag index.
 function paw.workspace.resolve(n)
   if type(n) == 'number' then
     return n
@@ -474,6 +619,8 @@ end
 -- .show, or .hide, so they sit at the end of the registration list
 -- and run *after* any paw.rule() the user has already registered --
 -- see the long comment above sw_hooks_registered for the reasoning).
+---@param name string  Scratchpad name -- used as the lookup key for `.toggle`/`.show`/`.hide`.
+---@param opts? paw.SpecialWorkspaceDef
 function paw.specialworkspace.set(name, opts)
   opts = opts or {}
   local def = sw_def(name)
@@ -619,6 +766,7 @@ end
 -- l_client_newindex's rejection of unknown client properties); a
 -- registered-but-spawnless def with no running instance is a silent
 -- no-op, since there's nothing to reveal and nothing to launch.
+---@param name string
 function paw.specialworkspace.toggle(name)
   if not sw_hooks_registered then sw_register_hooks() end
   local def = sw_defs[name]
@@ -651,6 +799,7 @@ end
 -- dismiss" rather than a flip-flop (e.g. a hook that shows a scratchpad
 -- on some external event, where re-triggering it mid-session shouldn't
 -- hide an already-visible one).
+---@param name string
 function paw.specialworkspace.show(name)
   if not sw_hooks_registered then sw_register_hooks() end
   local def = sw_defs[name]
@@ -670,6 +819,7 @@ function paw.specialworkspace.show(name)
   end
 end
 
+---@param name string
 function paw.specialworkspace.hide(name)
   if not sw_hooks_registered then sw_register_hooks() end
   local c = sw_find(name)
@@ -684,6 +834,7 @@ end
 -- spot. A later paw.specialworkspace.toggle(name)/hide(name) then works
 -- on it same as a spawn-configured one, just without a `spawn` to fall
 -- back on if it gets closed.
+---@param name string
 function paw.specialworkspace.move_focused(name)
   local c = uwu.client.focused()
   if not c then

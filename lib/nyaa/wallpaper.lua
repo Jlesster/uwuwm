@@ -25,6 +25,17 @@
 -- philosophy as uwu.set()/uwu.hook() treating an unknown name as a
 -- log-and-continue instead of aborting rc.lua.
 
+---@class nyaa.WallpaperEntry
+---One tracked wallpaper, as last applied via `nyaa.wallpaper.set()`. The
+---fields here are exactly the inputs that were used to spawn the
+---swaybg process -- `nyaa.wallpaper.current()` does NOT verify the
+---process is still alive, so reading this back is "what nyaa last told
+---it to do" rather than a liveness probe. See the header comment on
+---`nyaa.wallpaper` for the why.
+---@field path string   Image path (a leading "~" is expanded to $HOME before spawn).
+---@field mode "fill"|"fit"|"stretch"|"center"|"tile"
+---@field output string  Output name, or "*" for the fallback default.
+
 local wallpaper = {}
 
 -- swaybg's own -m values -- see `man swaybg`. "solid_color" is
@@ -82,12 +93,15 @@ end
 -- nyaa.wallpaper.set("~/Pictures/wall.png")
 -- nyaa.wallpaper.set("/path/to/wall.png", { mode = "fill", output = "DP-1" })
 --
--- `mode` (default "fill") is one of MODES above. `output` (default "*")
--- is an exact uwu.monitor.list() name, or "*" for every currently
--- connected output (swaybg's own default when passed no -o). Killing +
--- relaunching is intentional on every call -- reload-safety, same reason
--- nyaa.wear() is idempotent -- and only ever targets the previous
--- wallpaper client for this *same* output selector (see kill_marker()).
+---`mode` (default "fill") is one of MODES above. `output` (default "*")
+---is an exact uwu.monitor.list() name, or "*" for every currently
+---connected output (swaybg's own default when passed no -o). Killing +
+---relaunching is intentional on every call -- reload-safety, same reason
+---nyaa.wear() is idempotent -- and only ever targets the previous
+---wallpaper client for this *same* output selector (see kill_marker()).
+---@param path string
+---@param opts? { mode?: "fill"|"fit"|"stretch"|"center"|"tile", output?: string }
+---@return nyaa.WallpaperEntry?  The entry that was stored, or nil if swaybg is missing on PATH.
 function wallpaper.set(path, opts)
   opts = opts or {}
   if not path or path == '' then
@@ -142,6 +156,7 @@ end
 -- drops it from nyaa.wallpaper.current(), uncovering whatever
 -- background_color is set underneath. No-op, not an error, if nothing
 -- was ever set for that selector.
+---@param output? string  Output name, or "*" for the fallback default. Defaults to "*".
 function wallpaper.clear(output)
   output = output or '*'
   if not active[output] then
@@ -156,6 +171,7 @@ end
 -- verify the swaybg process is still alive (e.g. survived a crash) --
 -- purely "what nyaa last told it to do", same "read back what nyaa
 -- itself applied" contract as nyaa.worn().
+---@return table<string, nyaa.WallpaperEntry>  Snapshot keyed by output selector ("*" or an exact name).
 function wallpaper.current()
   local snapshot = {}
   for output, entry in pairs(active) do

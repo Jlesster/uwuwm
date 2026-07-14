@@ -16,11 +16,9 @@
 --         primitive namespaces paw/nyaa wrap below -- reach for them
 --         directly only when paw/nyaa genuinely don't cover something.
 --   paw   window-management sugar over `uwu` -- keybind lists w/
---         descriptions, client rules, short-named hooks, the tiling and
---         focus-navigation actions your keybinds actually call
---         (paw.layout/paw.client), tag actions under a friendlier name
---         (paw.workspace), and named floating scratchpads
---         (paw.specialworkspace)
+--         descriptions, client rules, short-named hooks, and (paw.layout/
+--         paw.client) the tiling and focus-navigation actions your
+--         keybinds actually call
 --   nyaa  aesthetics only -- two-color presets (nyaa.presets) or full
 --         26-role palettes (nyaa.palettes/nyaa.palette(), Catppuccin's
 --         four flavors plus a few others), applied via nyaa.wear() /
@@ -38,15 +36,18 @@
 local paw = require('paw')
 local nyaa = require('nyaa')
 
+local wallpaper_location =
+  '/home/jless/Pictures/Wallpapers/wallhaven-o5zo2l.png'
+uwu.wallpaper.set('*', { path = wallpaper_location })
+
 paw.layout.set('dwindle')
 
 -- ── Theme ────────────────────────────────────────────────────────────
--- nyaa.wear() only ever touches the eight *visual* uwu.visual.* fields
+-- nyaa.wear() only ever touches the seven *visual* uwu.visual.* fields
 -- (gap, border_width, border_color_active/inactive, background_color,
--- cursor_size, cursor_theme, inactive_opacity) -- it'll refuse
--- master_factor/repeat_rate/repeat_delay/terminal/launcher/
--- dwindle_preserve_split below with a pointer back to paw.defaults(),
--- which owns those instead.
+-- cursor_size, inactive_opacity) -- it'll refuse master_factor/
+-- repeat_rate/repeat_delay/terminal/launcher/dwindle_preserve_split below
+-- with a pointer back to paw.defaults(), which owns those instead.
 --
 -- `preset` (see nyaa.presets) seeds just the two border colors, same as
 -- before. `flavor` (see lib/nyaa/palettes.lua) seeds border colors *and*
@@ -55,20 +56,13 @@ paw.layout.set('dwindle')
 -- nyaa.export.* to track the same colors uwuwm itself is drawing with.
 -- Everything else is an override; every field is optional, and anything
 -- you don't set keeps RuntimeConfig's compiled-in default.
---
--- cursor_theme picks the theme wlr_xcursor_manager loads at startup --
--- must be installed system-wide under one of Xcursor's search paths
--- (~/.icons/<name>/cursors, /usr/share/icons/<name>/cursors, or
--- $XDG_DATA_HOME/icons), same lookup a GTK/Qt app's Xcursor theme picker
--- would use. Empty/unset falls back to $XCURSOR_THEME if set, then
--- wlroots' own built-in default (a plain arrow, no theme installed).
 nyaa.wear({
   flavor = 'catppuccin_mocha',
   gap = 8,
   border_width = 2,
   cursor_size = 24,
-  cursor_theme = 'Qogir',
-  inactive_opacity = 0.85, -- dim unfocused windows slightly; 1.0 disables
+  cursor_theme = 'qogir',
+  inactive_opacity = 0.25, -- dim unfocused windows slightly; 1.0 disables
 })
 
 -- nyaa.export.* renders the same palette nyaa.wear() just applied into
@@ -98,10 +92,10 @@ nyaa.wear({
 local apps = paw.defaults({
   master_factor = 0.55,
   repeat_rate = 25,
-  repeat_delay = 600,
-  terminal = 'wezterm',
-  launcher = 'fuzzel',
-  -- focus_follows_mouse = true, -- uncomment for hover-to-focus instead
+  repeat_delay = 240,
+  terminal = 'kitty',
+  launcher = 'kitty -e puffy',
+  focus_follows_mouse = true, -- uncomment for hover-to-focus instead
   -- of click-to-focus. Off by default; see uwu.set's doc comment in
   -- lib/meta/uwu.lua. Menus/tooltips/DND icons never take focus this
   -- way, and moving over bare desktop leaves the last-focused window
@@ -111,6 +105,51 @@ local apps = paw.defaults({
 local terminal = apps.terminal
 local launcher = apps.launcher
 local mod = { 'mod' }
+
+-- ── Special workspaces (scratchpads) ────────────────────────────────────
+-- paw.specialworkspace -- Hyprland-style named scratchpads: a floating
+-- window that toggles in and out of view on top of whatever tag you're
+-- currently on, instead of living on a fixed tag you have to go find it
+-- on. Built on client.minimized (see View::setMinimized in view.cpp) --
+-- toggling one off doesn't kill it, just hides it; toggling back on
+-- restores exactly where it was.
+--
+-- `spawn` is the command to launch if no instance is running yet;
+-- `match` is how paw recognizes the resulting window once it maps
+-- (usually the app's own --class/--app-id flag, so it doesn't
+-- accidentally claim an unrelated window of the same app you already
+-- had open); `size` is fractional (0-1) of the focused output's
+-- dimensions, applied fresh every time it's shown.
+paw.specialworkspace.set('term', {
+  spawn = terminal .. ' --class scratch_term',
+  match = { app_id = 'scratch_term' },
+  size = { width = 0.6, height = 0.55 },
+})
+
+paw.specialworkspace.set('music', {
+  spawn = 'kitty --class=scratch_music -e rmpc',
+  match = { app_id = 'scratch_music' },
+  size = { width = 0.4, height = 0.6 },
+})
+
+paw.keys({
+  {
+    mod,
+    'grave',
+    function()
+      paw.specialworkspace.toggle('term')
+    end,
+    'toggle scratchpad terminal',
+  },
+  {
+    { 'mod', 'shift' },
+    'grave',
+    function()
+      paw.specialworkspace.toggle('music')
+    end,
+    'toggle scratchpad music player',
+  },
+})
 
 -- ── Global keybinds ──────────────────────────────────────────────────
 -- paw.keys() takes the whole list at once and calls uwu.bind() for
@@ -392,84 +431,6 @@ paw.keys(keys)
 -- bind:
 -- paw.keys({ { { "mod", "shift", "ctrl" }, "9", function() uwu.tag.close_all(9) end } })
 
--- paw.workspace is the same tag actions above under friendlier names --
--- paw.workspace.go(n)/.toggle(n)/.move_focused_to(n)/.close_all(n) are
--- straight passthroughs to uwu.tag.view/toggle/move_client_here/
--- close_all, kept alongside the raw uwu.tag.* binds above rather than
--- replacing them (both call the same C side, pick whichever reads
--- better to you). The one thing paw.workspace adds that raw uwu.tag.*
--- doesn't have at all is a *read* side -- uwu.tag.current() didn't
--- exist until now, only ever the write side (view/toggle):
---
---   paw.workspace.current_indices() -- e.g. {3} while tag 3 is showing,
---                                       {2, 5} if tag 5 got toggled on
---                                       over tag 2 via mod+ctrl+5
---
--- Optional name aliases, if you'd rather bind mod+w than remember "tag
--- 4 is always chat":
--- paw.workspace.names({ web = 1, code = 2, chat = 4, scratch = 9 })
--- uwu.bind(mod, "w", function() paw.workspace.go("web") end)
-
--- ── Special workspaces (scratchpads) ────────────────────────────────────
--- paw.specialworkspace -- Hyprland-style named scratchpads: a floating
--- window that toggles in and out of view on top of whatever tag you're
--- currently on, instead of living on a fixed tag you have to go find it
--- on. Built on client.minimized (see View::setMinimized in view.cpp) --
--- toggling one off doesn't kill it, just hides it; toggling back on
--- restores exactly where it was.
---
--- `spawn` is the command to launch if no instance is running yet;
--- `match` is how paw recognizes the resulting window once it maps
--- (usually the app's own --class/--app-id flag, so it doesn't
--- accidentally claim an unrelated window of the same app you already
--- had open); `size` is fractional (0-1) of the focused output's
--- dimensions, applied fresh every time it's shown.
-paw.specialworkspace.set('term', {
-  spawn = terminal .. ' start --class scratch_term',
-  match = { app_id = 'scratch_term' },
-  size = { width = 0.6, height = 0.55 },
-})
-
-paw.specialworkspace.set('music', {
-  spawn = 'spotify --class=scratch_music',
-  match = { app_id = 'scratch_music' },
-  size = { width = 0.4, height = 0.6 },
-})
-
-paw.keys({
-  {
-    mod,
-    'grave',
-    function()
-      paw.specialworkspace.toggle('term')
-    end,
-    'toggle scratchpad terminal',
-  },
-  {
-    { 'mod', 'shift' },
-    'grave',
-    function()
-      paw.specialworkspace.toggle('music')
-    end,
-    'toggle scratchpad music player',
-  },
-})
-
--- No paw.specialworkspace.set() needed at all for ad hoc use -- grab
--- whatever's focused right now and stash it as a scratchpad on the
--- spot, no pre-registered spawn command required:
--- uwu.bind({ "mod", "shift" }, "s", function()
---   paw.specialworkspace.move_focused("adhoc")
--- end)
--- uwu.bind(mod, "s", function() paw.specialworkspace.toggle("adhoc") end)
-
--- .show(name)/.hide(name) are the non-toggling versions, for a bind (or
--- a hook) that wants "always bring to front" / "always dismiss" rather
--- than a flip-flop -- e.g. always surface the scratchpad terminal on
--- reload instead of leaving it in whatever state a previous session's
--- toggle left it:
--- paw.on("monitor_connected", function() paw.specialworkspace.show("term") end)
-
 -- ── Monitor configuration ───────────────────────────────────────────────
 -- Output configuration (position/mode/scale/transform/adaptive-sync) is
 -- lower level than anything a theme/keybind wrapper should paper over --
@@ -477,13 +438,16 @@ paw.keys({
 -- (e.g. from a keybind that dumps it to notify-send or a log) to see
 -- connected output names before filling these in.
 --
--- uwu.monitor.set("DP-1", {
---     x = 0, y = 0,
---     width = 2560, height = 1440, refresh = 144,
---     scale = 1.0,
---     transform = "normal", -- normal|90|180|270|flipped|flipped-90|...
---     adaptive_sync = true,
--- })
+uwu.monitor.set('eDP-1', {
+  x = 0,
+  y = 0,
+  width = 1920,
+  height = 1080,
+  refresh = 144,
+  scale = 1.0,
+  transform = 'normal', -- normal|90|180|270|flipped|flipped-90|...
+  adaptive_sync = true,
+})
 -- uwu.monitor.set("eDP-1", { x = 2560, y = 0, enabled = true })
 -- uwu.monitor.set("*", { scale = 1.0 }) -- fallback default for anything else
 
@@ -506,26 +470,16 @@ uwu.input.set('type:touchpad', {
 -- auto-detected before this rule runs), `set` is what gets applied.
 -- paw.like(pattern) marks a field as a Lua pattern (uwuwm's own "~"
 -- prefix convention) instead of an exact string match.
---
--- Registration order matters here: uwu.rule()'s hooks fire in the order
--- they're registered, on the same live client, so a *later* rule sees
--- whatever an *earlier* rule already changed. The auto-detected-floating
--- catch-all right below has to be registered first for exactly that
--- reason -- registered last, it'd also catch anything an app-specific
--- rule below it had *just* floated (pavucontrol, say), silently
--- reassigning it to tag 9 as a side effect of a rule that only meant to
--- set `floating`. Registered first, it only ever sees whichever clients
--- handleMap's own floating auto-detection already decided on (a parented
--- window, a fixed-size dialog, an X11 _NET_WM_WINDOW_TYPE_DIALOG/
--- UTILITY/SPLASH) -- one rule instead of naming every file-picker/
--- color-chooser app_id by hand -- before any rule below it has floated
--- anything else.
-paw.rule({ when = { floating = true }, set = { tag = 9 } })
-
 paw.rule({ when = { app_id = 'mpv' }, set = { floating = true, tag = 3 } })
-paw.rule({ when = { app_id = 'foot' }, set = { tag = 1 } })
 paw.rule({ when = { app_id = 'pavucontrol' }, set = { floating = true } })
 paw.rule({ when = { app_id = paw.like('steam_app_.*') }, set = { tag = 9 } })
+-- Anything already auto-detected as floating (a parent window, a
+-- fixed-size dialog, or an X11 client with
+-- _NET_WM_WINDOW_TYPE_DIALOG/UTILITY/SPLASH) that isn't caught by a
+-- more specific rule above still gets parked on the scratch tag
+-- (9) -- one rule instead of naming every file-picker/color-chooser
+-- app_id by hand.
+paw.rule({ when = { floating = true }, set = { tag = 9 } })
 
 -- Per-client border theming -- nyaa.rule(), sugar over uwu.rule()'s
 -- apply.border_color_active/inactive/opacity. `preset` seeds both colors
