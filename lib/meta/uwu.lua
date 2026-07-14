@@ -71,14 +71,17 @@ function uwu.get(name) end
 ---@class uwu.visual
 uwu.visual = {}
 
----Sets one of the seven *appearance* settings: "gap", "border_width",
----"cursor_size", "border_color_active", "border_color_inactive",
----"background_color", "inactive_opacity" (0.05-1.0, clamped; static
----per-view dim applied the moment focus leaves it -- see
----View::setFocused). This is what nyaa.wear() calls underneath; prefer
----that unless you're building your own theming layer. Any of the seven
----*behavior* names uwu.behavior.set() owns -- or a genuine typo -- is
----refused the same way: logged and ignored, not an error.
+---Sets one of the eight *appearance* settings: "gap", "border_width",
+---"cursor_size", "cursor_theme" (xcursor theme name, e.g. "Qogir" --
+---empty/unset falls back to the XCURSOR_THEME env var if that's set,
+---then wlroots' own built-in default), "border_color_active",
+---"border_color_inactive", "background_color", "inactive_opacity"
+---(0.05-1.0, clamped; static per-view dim applied the moment focus
+---leaves it -- see View::setFocused). This is what nyaa.wear() calls
+---underneath; prefer that unless you're building your own theming
+---layer. Any of the seven *behavior* names uwu.behavior.set() owns --
+---or a genuine typo -- is refused the same way: logged and ignored,
+---not an error.
 ---@param name string
 ---@param value string|number|boolean
 function uwu.visual.set(name, value) end
@@ -96,7 +99,7 @@ uwu.behavior = {}
 ---"repeat_rate", "repeat_delay", "terminal", "launcher",
 ---"focus_follows_mouse", "dwindle_preserve_split". This is what
 ---paw.defaults() calls underneath; prefer that unless you're building
----your own config layer. Any of the seven *visual* names uwu.visual.set()
+---your own config layer. Any of the eight *visual* names uwu.visual.set()
 ---owns -- or a genuine typo -- is refused the same way: logged and
 ---ignored, not an error.
 ---@param name string

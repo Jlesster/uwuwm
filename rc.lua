@@ -39,11 +39,12 @@ local nyaa = require('nyaa')
 paw.layout.set('dwindle')
 
 -- ── Theme ────────────────────────────────────────────────────────────
--- nyaa.wear() only ever touches the seven *visual* uwu.visual.* fields
+-- nyaa.wear() only ever touches the eight *visual* uwu.visual.* fields
 -- (gap, border_width, border_color_active/inactive, background_color,
--- cursor_size, inactive_opacity) -- it'll refuse master_factor/
--- repeat_rate/repeat_delay/terminal/launcher/dwindle_preserve_split below
--- with a pointer back to paw.defaults(), which owns those instead.
+-- cursor_size, cursor_theme, inactive_opacity) -- it'll refuse
+-- master_factor/repeat_rate/repeat_delay/terminal/launcher/
+-- dwindle_preserve_split below with a pointer back to paw.defaults(),
+-- which owns those instead.
 --
 -- `preset` (see nyaa.presets) seeds just the two border colors, same as
 -- before. `flavor` (see lib/nyaa/palettes.lua) seeds border colors *and*
@@ -52,11 +53,19 @@ paw.layout.set('dwindle')
 -- nyaa.export.* to track the same colors uwuwm itself is drawing with.
 -- Everything else is an override; every field is optional, and anything
 -- you don't set keeps RuntimeConfig's compiled-in default.
+--
+-- cursor_theme picks the theme wlr_xcursor_manager loads at startup --
+-- must be installed system-wide under one of Xcursor's search paths
+-- (~/.icons/<name>/cursors, /usr/share/icons/<name>/cursors, or
+-- $XDG_DATA_HOME/icons), same lookup a GTK/Qt app's Xcursor theme picker
+-- would use. Empty/unset falls back to $XCURSOR_THEME if set, then
+-- wlroots' own built-in default (a plain arrow, no theme installed).
 nyaa.wear({
   flavor = 'catppuccin_mocha',
   gap = 8,
   border_width = 2,
   cursor_size = 24,
+  cursor_theme = 'Qogir',
   inactive_opacity = 0.85, -- dim unfocused windows slightly; 1.0 disables
 })
 

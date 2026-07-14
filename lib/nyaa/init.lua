@@ -1,8 +1,9 @@
 -- nyaa -- uwuwm's theming module. Appearance only.
 --
--- uwu.visual.set(name, value)/uwu.visual.get(name) cover seven settings --
+-- uwu.visual.set(name, value)/uwu.visual.get(name) cover eight settings --
 -- how things *look* (gap, border_width, border_color_active,
--- border_color_inactive, background_color, cursor_size, inactive_opacity).
+-- border_color_inactive, background_color, cursor_size, cursor_theme,
+-- inactive_opacity).
 -- Six more exist (master_factor, repeat_rate/repeat_delay, terminal/
 -- launcher, dwindle_preserve_split) but those are *behavior*, and
 -- uwu.visual.set/get refuse them outright at the C level (see
@@ -123,11 +124,12 @@ local FLAVOR_ACCENT = {
   everforest = 'green',
 }
 
--- The seven visual fields nyaa owns.
+-- The eight visual fields nyaa owns.
 local VISUAL_FIELDS = {
   gap = true,
   border_width = true,
   cursor_size = true,
+  cursor_theme = true,
   border_color_active = true,
   border_color_inactive = true,
   background_color = true,
@@ -275,7 +277,7 @@ function nyaa.wear(theme)
   return merged
 end
 
--- nyaa.worn() -- reads the seven visual settings back out of
+-- nyaa.worn() -- reads the eight visual settings back out of
 -- uwu.visual.get(), as one table. Handy for a status-bar module, or just
 -- `print`ing to sanity-check what actually landed after nyaa.wear().
 function nyaa.worn()

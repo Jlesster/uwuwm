@@ -51,6 +51,15 @@ struct RuntimeConfig {
     int    repeat_delay_ms = 600;
     double cursor_size     = 24;
 
+    // Empty (default) means "let wlr_xcursor_manager_create() fall back
+    // to its own default, which reads the XCURSOR_THEME env var itself
+    // if set" -- same "unset means defer to the underlying default"
+    // convention every other string setting here follows (terminal/
+    // launcher are the two other examples). Read once at startup by
+    // input::setupCursor (input.cpp), same as cursor_size -- see that
+    // call site's comment for why this doesn't need to be reload-aware.
+    std::string cursor_theme;
+
     // Click-to-focus is the default (false) -- matches every other
     // uwuwm behavior default being "off until rc.lua asks for it".
     // Consulted once per pointer-motion event in processCursorMotion

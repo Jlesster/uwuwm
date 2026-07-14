@@ -235,6 +235,7 @@ const std::unordered_map<std::string, SettingCategory> kSettingCategory = {
     {"border_color_inactive",  SettingCategory::Visual  },
     {"background_color",       SettingCategory::Visual  },
     {"cursor_size",            SettingCategory::Visual  },
+    {"cursor_theme",           SettingCategory::Visual  },
     {"inactive_opacity",       SettingCategory::Visual  },
     {"master_factor",          SettingCategory::Behavior},
     {"repeat_rate",            SettingCategory::Behavior},
@@ -270,6 +271,10 @@ const std::unordered_map<std::string, SetterFunc> kSettingSetters = {
     {"cursor_size",
      [](lua_State* L, RuntimeConfig& s) {
          s.cursor_size = luaL_checknumber(L, 2);
+     }},
+    {"cursor_theme",
+     [](lua_State* L, RuntimeConfig& s) {
+         s.cursor_theme = luaL_checkstring(L, 2);
      }},
     {"terminal",
      [](lua_State* L, RuntimeConfig& s) {
@@ -336,6 +341,10 @@ const std::unordered_map<std::string, GetterFunc> kSettingGetters = {
     {"cursor_size",
      [](lua_State* L, const RuntimeConfig& s) {
          lua_pushnumber(L, s.cursor_size);
+     }},
+    {"cursor_theme",
+     [](lua_State* L, const RuntimeConfig& s) {
+         lua_pushstring(L, s.cursor_theme.c_str());
      }},
     {"terminal",
      [](lua_State* L, const RuntimeConfig& s) {
@@ -2136,6 +2145,7 @@ uwu.set("background_color", "#111217")
 uwu.set("repeat_rate", 25)
 uwu.set("repeat_delay", 600)
 uwu.set("cursor_size", 24)
+-- uwu.set("cursor_theme", "Qogir")  -- must be installed under an Xcursor search path
 
 local terminal = "wezterm"
 local launcher = "fuzzel"

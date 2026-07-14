@@ -569,8 +569,16 @@ void setupCursor(Server& server) {
     server.cursor = wlr_cursor_create();
     wlr_cursor_attach_output_layout(server.cursor, server.output_layout);
 
-    server.cursor_mgr = wlr_xcursor_manager_create(
-        nullptr, static_cast<uint32_t>(server.lua_cfg.settings.cursor_size));
+    // nullptr (cursor_theme unset) falls through to
+    // wlr_xcursor_manager_create's own default, which itself reads
+    // XCURSOR_THEME from the environment if present -- so this is purely
+    // additive: uwu.set("cursor_theme", "Qogir") in rc.lua now works
+    // whether or not the session that launched uwuwm ever exported
+    // XCURSOR_THEME itself (many display managers/session scripts don't).
+    const std::string& cursor_theme = server.lua_cfg.settings.cursor_theme;
+    server.cursor_mgr               = wlr_xcursor_manager_create(
+        cursor_theme.empty() ? nullptr : cursor_theme.c_str(),
+        static_cast<uint32_t>(server.lua_cfg.settings.cursor_size));
 
     // All pointer motion ultimately funnels through wlr_cursor's signals
     // regardless of which physical device generated it, so we only ever
