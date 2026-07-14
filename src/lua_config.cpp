@@ -2738,11 +2738,11 @@ bool LuaConfig::reload() {
     // any/all uwu.bind() calls run, etc.) we roll back to this instead of
     // leaving the compositor with an empty keybind set -- which would
     // include losing the very reload keybind you just used to get here.
-    lua_State*                          old_L        = L;
-    std::multimap<uint32_t, LuaKeybind> old_keybinds = std::move(keybinds);
+    lua_State*                          old_L          = L;
+    std::multimap<uint32_t, LuaKeybind> old_keybinds   = std::move(keybinds);
     std::vector<LuaMousebind>           old_mousebinds = std::move(mousebinds);
-    std::vector<MonitorRule>            old_rules    = std::move(monitor_rules);
-    std::vector<InputRule>     old_input_rules       = std::move(input_rules);
+    std::vector<MonitorRule>            old_rules  = std::move(monitor_rules);
+    std::vector<InputRule>     old_input_rules     = std::move(input_rules);
     std::vector<WallpaperRule> old_wallpaper_rules = std::move(wallpaper_rules);
     std::vector<LuaHook>       old_hooks           = std::move(hooks);
     RuntimeConfig              old_settings        = settings;
