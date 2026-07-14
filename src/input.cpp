@@ -640,13 +640,24 @@ void setupCursor(Server& server) {
         [&server](wlr_pointer_button_event* event) {
             notifyIdleActivity(server);
 
-            wlr_seat_pointer_notify_button(
-                server.seat, event->time_msec, event->button, event->state);
-
             if(event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
+                bool was_mousebind_grab = server.mousebind_grab_active;
                 if(server.cursor_mode != CursorMode::Passthrough) {
                     resetCursorMode(server);
                 }
+                if(was_mousebind_grab) {
+                    // This press was consumed by a uwu.mousebind() grab
+                    // below and never reached the client (see the
+                    // PRESSED branch) -- the matching release shouldn't
+                    // either, or an app would see a lone button-up with
+                    // no preceding button-down. A client-initiated grab
+                    // (request_move/request_resize) *did* see its press
+                    // via the ordinary path below, so its release still
+                    // gets forwarded same as before.
+                    return;
+                }
+                wlr_seat_pointer_notify_button(
+                    server.seat, event->time_msec, event->button, event->state);
                 return;
             }
 
@@ -654,6 +665,35 @@ void setupCursor(Server& server) {
             double       sx, sy;
             View*        v = desktopViewAt(
                 server, server.cursor->x, server.cursor->y, &surface, &sx, &sy);
+
+            // uwu.mousebind() -- floating-window drag-move/drag-resize,
+            // sway/i3's floating_modifier equivalent. Checked before the
+            // click is forwarded to the client: a matching bind grabs the
+            // whole click for the compositor (focuses the view, invokes
+            // the bound Lua closure -- typically client:begin_move() or
+            // client:begin_resize() -- and stops there) instead of *also*
+            // sending it on to whatever's under the cursor, same reason
+            // sway doesn't let a modifier-drag also draw a text selection
+            // in the app underneath it.
+            if(v && !v->unmanaged) {
+                uint32_t mods_state = 0;
+                if(wlr_keyboard* kb = wlr_seat_get_keyboard(server.seat)) {
+                    mods_state =
+                        wlr_keyboard_get_modifiers(kb) & kBindableMods;
+                }
+                for(const auto& mb : server.lua_cfg.mousebinds) {
+                    if(mb.mods == mods_state && mb.button == event->button) {
+                        server.focusView(v);
+                        server.mousebind_grab_active = true;
+                        server.lua_cfg.invokeWithClient(mb.fn_ref, v);
+                        return;
+                    }
+                }
+            }
+
+            wlr_seat_pointer_notify_button(
+                server.seat, event->time_msec, event->button, event->state);
+
             // Unmanaged (X11 override-redirect) windows -- menus,
             // tooltips, DND icons -- don't take keyboard focus on click,
             // same as every other compositor.
@@ -776,8 +816,9 @@ void processCursorMotion(Server& server, uint32_t time_msec) {
 }
 
 void resetCursorMode(Server& server) {
-    server.cursor_mode  = CursorMode::Passthrough;
-    server.grabbed_view = nullptr;
+    server.cursor_mode          = CursorMode::Passthrough;
+    server.grabbed_view         = nullptr;
+    server.mousebind_grab_active = false;
 }
 
 bool shortcutsInhibited(Server& server) {

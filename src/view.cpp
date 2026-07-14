@@ -7,6 +7,7 @@ extern "C" {
 #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
 #include <wlr/types/wlr_scene.h>
 #include <wlr/types/wlr_seat.h>
+#include <wlr/util/edges.h>
 }
 
 #include "idle.hpp"
@@ -40,8 +41,9 @@ View::~View() {
 
     if(server.focused_view == this) { server.focused_view = nullptr; }
     if(server.grabbed_view == this) {
-        server.grabbed_view = nullptr;
-        server.cursor_mode  = CursorMode::Passthrough;
+        server.grabbed_view          = nullptr;
+        server.cursor_mode           = CursorMode::Passthrough;
+        server.mousebind_grab_active = false;
     }
     // Recursive: tears down border_tree/border_rects and whatever of
     // content_tree is still alive (for XdgToplevel, the client's own
@@ -477,6 +479,16 @@ void View::beginInteractiveResize(uint32_t edges) {
     server.grab_x       = server.cursor->x;
     server.grab_y       = server.cursor->y;
     server.grab_geobox  = geo;
+}
+
+void View::beginInteractiveResizeFromCursor() {
+    if(!is_floating || is_fullscreen) { return; }
+    double mid_x = geo.x + geo.width / 2.0;
+    double mid_y = geo.y + geo.height / 2.0;
+    uint32_t edges =
+        (server.cursor->x < mid_x ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT) |
+        (server.cursor->y < mid_y ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM);
+    beginInteractiveResize(edges);
 }
 
 void View::setOpacity(float alpha) {

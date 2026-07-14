@@ -304,6 +304,20 @@ public:
     wlr_box    grab_geobox{};
     uint32_t   resize_edges = 0;
 
+    // Set true for the duration of a uwu.mousebind()-initiated grab (see
+    // input.cpp's cursor_button handler), false for a client-initiated one
+    // (xdg_toplevel/xwayland request_move/request_resize, entered via
+    // View::beginInteractiveMove/beginInteractiveResize directly). Both
+    // land in the same cursor_mode != Passthrough state, but only the
+    // mousebind path also skipped forwarding the *press* to the client --
+    // a client-initiated grab's press already went through the ordinary
+    // wlr_seat_pointer_notify_button call before the grab even started.
+    // The button-release handler consults this to decide whether the
+    // matching release should be forwarded too (client-initiated: yes, to
+    // balance the press it already saw; mousebind-initiated: no, same as
+    // the press it never saw).
+    bool mousebind_grab_active = false;
+
     void    focusView(View* view);
     void    closeOnTag(uint32_t tagmask);
     Output* outputAt(double lx, double ly);

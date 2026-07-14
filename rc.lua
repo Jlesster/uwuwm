@@ -254,6 +254,27 @@ local keys = {
     end,
     'shrink floating window height',
   },
+
+  -- Keyboard-armed move/resize -- mod+z arms an interactive drag-move on
+  -- the focused client, mod+x arms drag-resize; move the mouse to
+  -- actually move/resize it, click any button to drop it. Same grab
+  -- mod+drag/mod+right-drag start below (see uwu.mousebind() calls near
+  -- the end of this file), just armed by a key on the focused client
+  -- instead of a click on whatever's under the cursor. No-op with
+  -- nothing focused, or on a tiled/fullscreen client.
+  {
+    mod,
+    'z',
+    paw.client.begin_move,
+    'keyboard-arm drag-move (mouse to move, click to drop)',
+  },
+  {
+    mod,
+    'x',
+    paw.client.begin_resize,
+    'keyboard-arm drag-resize (mouse to resize, click to drop)',
+  },
+
   {
     mod,
     'i',
@@ -424,6 +445,32 @@ paw.tags(function(i)
 end)
 
 paw.keys(keys)
+
+-- Floating-window drag-move/drag-resize -- sway/i3's floating_modifier
+-- equivalent. Hold `mod` and drag with the left button anywhere on a
+-- floating client (not just a titlebar -- there isn't one) to move it;
+-- mod+right-drag resizes it, picking which edge grows/shrinks from
+-- whichever quadrant of the window the cursor was over when the drag
+-- started. Both are silent no-ops on a tiled/fullscreen client, same as
+-- the mod+alt nudge binds above -- click-dragging something that isn't
+-- floating yet does nothing until mod+space has floated it first. See
+-- mod+z/mod+x above for a keyboard-armed version of the same grab that
+-- doesn't need a click to start it.
+uwu.mousebind({ 'mod' }, 'left', function(c)
+  c:begin_move()
+end)
+uwu.mousebind({ 'mod' }, 'right', function(c)
+  c:begin_resize()
+end)
+
+-- You can bind floating window manipulation to individual keys alongside
+-- the core mouse binds
+uwu.mousebind({ 'mod' }, 'z', function(c)
+  c:begin_move()
+end)
+uwu.mousebind({ 'mod' }, 'x', function(c)
+  c:begin_resize()
+end)
 
 -- uwu.tag.close_all(n) gracefully closes every window on tag n --
 -- destructive, so it's deliberately not bound to a key here. Wire it up

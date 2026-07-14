@@ -209,6 +209,20 @@ struct LuaKeybind {
                       // lifetime of the owning LuaConfig's lua_State.
 };
 
+// uwu.mousebind(mods, button, fn) -- same idea as LuaKeybind above, but for
+// a modifier+pointer-button combo instead of a modifier+key one. This is
+// what floating-window drag-move/drag-resize is built on (sway/i3's
+// floating_modifier equivalent): rc.lua binds e.g. {"mod"}+left to a
+// closure that calls client:begin_move(), and {"mod"}+right to one that
+// calls client:begin_resize(). Dispatched from the cursor-button handler
+// in input.cpp against whichever view is under the cursor at press time,
+// the same way LuaKeybind is dispatched against whichever keysym came in.
+struct LuaMousebind {
+    uint32_t mods;
+    uint32_t button;  // linux/input-event-codes.h BTN_* value
+    int      fn_ref;
+};
+
 // One uwu.hook(event, fn) registration. `id` is what uwu.unhook() takes;
 // handed out sequentially by LuaConfig::next_hook_id rather than reusing
 // the registry ref itself, so a hook can be unregistered from *inside*
@@ -252,6 +266,14 @@ public:
     // not throw/crash) on error -- one misbehaving keybind shouldn't take
     // the whole compositor down.
     void invoke(int fn_ref);
+
+    // Same as invoke(), but calls fn_ref with a single argument: a fresh
+    // Client userdata wrapping `view` (see checkClient()/pushClient() in
+    // lua_config.cpp). Used for uwu.mousebind() closures, which -- unlike
+    // plain keybinds -- are dispatched against whatever view happened to
+    // be under the cursor at press time, so the closure needs a handle to
+    // it (typically to call client:begin_move()/:begin_resize()).
+    void invokeWithClient(int fn_ref, View* view);
 
     // Fully reloads rc.lua from scratch: clears keybinds/monitor_rules,
     // resets settings back to RuntimeConfig{} defaults, closes the
@@ -308,6 +330,7 @@ public:
 
     RuntimeConfig                       settings;
     std::multimap<uint32_t, LuaKeybind> keybinds;
+    std::vector<LuaMousebind>           mousebinds;
 
     // Registered by uwu.hook(), consumed by fire*Event above. Cleared and
     // repopulated on every reload() exactly like keybinds/monitor_rules --

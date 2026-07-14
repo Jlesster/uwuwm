@@ -10,6 +10,10 @@
 # Targets:
 #   make            - configure (meson setup) and build (ninja)
 #   make build      - same as `make`
+#   make deps       - install uwuwm's build- and runtime-time deps via
+#                     scripts/install-deps.sh (one shot across Arch,
+#                     Debian/Ubuntu, Fedora, Void, Alpine, openSUSE,
+#                     Gentoo; NixOS gets a nix-shell hint instead)
 #   make clean      - ninja clean in builddir/
 #   make install    - build, then `sudo` the install + chown
 #   make -n install - print the install commands without running them
@@ -44,13 +48,29 @@ INSTALL_DIRS := \
 # `install_data`/`install_subdir` calls were in meson.build.
 INSTALL_LIST := install.list
 
-.PHONY: all build clean install
+.PHONY: all build deps clean install
 
 all: build
 
 build:
 	meson setup --reconfigure $(BUILD_DIR)
 	ninja -C $(BUILD_DIR)
+
+# install-deps.sh uses sudo internally; if sudo isn't on PATH the
+# script will tell the user, but we still gate the target here so
+# `make deps` on a system without sudo (running as root already,
+# e.g. inside a container) doesn't blow up with a confusing
+# "command not found" instead of skipping sudo. The script
+# itself probes for sudo and falls back to running unprivileged
+# for distros where deps can be installed without it (Alpine in
+# some configs, NixOS via nix-shell) -- see the script body.
+deps:
+	@command -v sudo >/dev/null 2>&1 || { \
+		echo "uwuwm: 'sudo' is required for 'make deps' (the install needs root for most distros)" >&2; \
+		echo "uwuwm: install sudo, or run scripts/install-deps.sh as root yourself" >&2; \
+		exit 1; \
+	}
+	./scripts/install-deps.sh
 
 clean:
 	ninja -C $(BUILD_DIR) -t clean

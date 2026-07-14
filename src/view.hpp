@@ -275,12 +275,36 @@ struct View {
     // includes view.hpp, and view.hpp only forward-declares it.
     void applyOpacityOverride();
 
+    // Thin public wrappers around the protected beginInteractiveMove()/
+    // beginInteractiveResizeFromCursor() below, for the exact same reason
+    // applyOpacityOverride() above is a wrapper around protected
+    // setOpacity(): uwu.mousebind() closures call client:begin_move()/
+    // :begin_resize() (l_client_begin_move/l_client_begin_resize in
+    // lua_config.cpp), which are free C functions, not View members, and
+    // so can't reach the protected methods directly the way
+    // XdgToplevel::handleRequestMove/XWaylandView::handleRequestMove can.
+    void beginMoveFromMousebind() { beginInteractiveMove(); }
+    void beginResizeFromMousebind() { beginInteractiveResizeFromCursor(); }
+
 protected:
     // Shared implementations for the request_move/request_resize handlers
     // every backend has (xdg_toplevel and xwayland both expose them) --
     // pure Server/View bookkeeping, no backend-specific call involved.
     void beginInteractiveMove();
     void beginInteractiveResize(uint32_t edges);
+
+    // Same as beginInteractiveResize(edges), but picks `edges` itself from
+    // which quadrant of the window the cursor is currently over (left half
+    // drags the left edge, top half drags the top edge, etc) instead of
+    // requiring the caller to know which edge it wants up front -- the
+    // same "resize from the nearest edge/corner" convention i3/sway's
+    // floating_modifier resize-drag uses. Meant for uwu.mousebind()
+    // closures (client:begin_resize(), via beginResizeFromMousebind()
+    // above) where the bind fires from wherever the cursor happened to
+    // be, not from a specific titlebar corner the way
+    // XdgToplevel::handleRequestResize's edges (driven by the client's
+    // own CSD hit-test) are.
+    void beginInteractiveResizeFromCursor();
 
     // Starts the "grow-in" open animation (fade 0->1, slight upward
     // slide-in) from the view's current `geo`. Call once, right after the

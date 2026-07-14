@@ -51,6 +51,27 @@ function uwu.reload() end
 ---@param fn fun()
 function uwu.bind(mods, key, fn) end
 
+---Registers a mousebind: `mods` (same names as uwu.bind above) plus a
+---pointer button -- "left"/"right"/"middle"/"side"/"extra" (or a raw
+---BTN_* evdev name/number) -- pressed while the cursor is over a client.
+---`fn` is called as `fn(client)` with that client, and the whole click is
+---consumed by the compositor (not forwarded to the app underneath) if a
+---bind matches. This is what floating-window drag-move/drag-resize is
+---built on -- sway/i3's floating_modifier equivalent:
+---
+---    uwu.mousebind({"mod"}, "left", function(c) c:begin_move() end)
+---    uwu.mousebind({"mod"}, "right", function(c) c:begin_resize() end)
+---
+---Both begin_move()/begin_resize() are silent no-ops on a tiled or
+---fullscreen client -- a mousebind fires on whatever's under the cursor,
+---so no error just because that happens to not be floating right now. An
+---unknown button name is logged and skipped, same as an unknown key name
+---in uwu.bind above.
+---@param mods string[]
+---@param button string
+---@param fn fun(client: Client)
+function uwu.mousebind(mods, button, fn) end
+
 -- ── settings ─────────────────────────────────────────────────────────────
 
 ---@deprecated Use uwu.visual.set() (7 appearance fields) or
@@ -423,6 +444,20 @@ function Client:move(x, y) end
 ---@param width integer
 ---@param height integer
 function Client:resize(width, height) end
+
+---Starts an interactive drag-move grab for this client -- the mouse
+---equivalent of dragging a titlebar, driven by cursor motion instead of
+---an absolute (x, y). Meant to be called from a uwu.mousebind() closure.
+---Silent no-op on a tiled or fullscreen client.
+function Client:begin_move() end
+
+---Starts an interactive drag-resize grab for this client. Which edges
+---grow/shrink is picked from which quadrant of the window the cursor was
+---over when the bind fired (left half drags the left edge, top half
+---drags the top edge, etc), the same convention i3/sway's
+---floating_modifier resize-drag uses. Meant to be called from a
+---uwu.mousebind() closure. Silent no-op on a tiled or fullscreen client.
+function Client:begin_resize() end
 
 ---@class uwu.client
 uwu.client = {}

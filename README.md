@@ -74,17 +74,44 @@ known runtime gaps in what is wired, see [MISSING.md](MISSING.md).
 
 ## Building
 
-```sh
-sudo pacman -S wlroots0.20 wayland wayland-protocols libinput xkbcommon \
-    pixman meson ninja pkgconf wayland-utils lua54
-# wlroots 0.20 not packaged on your distro? Build it from source (meson)
-# and make sure its .pc file is on PKG_CONFIG_PATH.
-# wayland-protocols >= 1.31 is required for the wp-tearing-control-v1
-# protocol headers in staging/.
+uwuwm's `Makefile` is a thin wrapper over meson/ninja; the dep install
+is the only non-obvious step. Start there:
 
+```sh
+make deps    # install wlroots 0.20, wayland-protocols, lua5.4, ...
 meson setup build
 ninja -C build
 ```
+
+`make deps` is a one-shot installer for uwuwm's build- and runtime-time
+deps (`scripts/install-deps.sh` underneath) that detects the distro
+from `/etc/os-release` and dispatches to the right package manager
+across Arch (and derivatives), Debian/Ubuntu, Fedora/RHEL, Void, Alpine,
+openSUSE, and Gentoo. NixOS gets a `nix-shell` one-liner printed
+instead. Re-running is safe -- already-installed packages are skipped.
+`make deps --check` (or `./scripts/install-deps.sh --check`) prints
+what *would* be installed without invoking the package manager, useful
+for reviewing a list before committing.
+
+The build itself is just `meson setup` + `ninja`; the only quirk is
+that meson.build's `wlroots-0.20` lookup falls back to `wlroots` if
+your distro hasn't versioned the slot, and `scripts/patch_wlroots_headers.py`
+strips the C99 `[static N]` syntax from `wlr/render/color.h` and
+`wlr/types/wlr_scene.h` because Clang rejects it in C++ -- both
+visible in the meson log on a successful build.
+
+### If `make deps` doesn't recognize your distro
+
+`scripts/install-deps.sh` prints the manual install list as a fallback.
+The short version, in case the script itself isn't available:
+
+| Purpose | Packages |
+| --- | --- |
+| Build tools | `meson`, `ninja`, `pkgconf` (or `pkg-config`), `python3`, `gcc/g++` |
+| wlroots | **`wlroots 0.20` is mandatory** -- 0.19 / 0.18 will not build uwuwm. Look for `wlroots0.20`, `wlroots-0.20`, `libwlroots-0.20-dev`, or `wlroots-devel` depending on distro. Source build (meson) works too -- put the resulting `.pc` file on `PKG_CONFIG_PATH`. |
+| Wayland stack | `wayland-server`, `wayland-protocols` (>= 1.31, for `wp-tearing-control-v1`), `libinput`, `libxkbcommon`, `pixman`, `xcb` |
+| Lua | `lua 5.4` (headers + library) |
+| Runtime | `swaybg` -- only if you want `nyaa.wallpaper.set()` to actually launch something; uwuwm itself works fine without it, the helper just logs a warning and leaves `background_color` as-is. |
 
 ## Running
 

@@ -9,6 +9,7 @@ extern "C" {
 
 #include <lauxlib.h>
 #include <libinput.h>
+#include <linux/input-event-codes.h>
 #include <lua.h>
 #include <lualib.h>
 #include <sys/wait.h>
@@ -160,6 +161,26 @@ uint32_t parseModTable(lua_State* L, int idx) {
         lua_pop(L, 1);
     }
     return mods;
+}
+
+// Parses a uwu.mousebind() button argument: "left"/"right"/"middle" (the
+// common case), the underlying BTN_LEFT/BTN_RIGHT/BTN_MIDDLE evdev name if
+// someone wants to be explicit, or a bare number for anything else (e.g. a
+// side button whose code isn't worth naming here). Returns 0 -- never a
+// real evdev button code -- on anything unrecognized, which l_mousebind
+// below logs and skips (same treatment l_bind gives an unknown key name)
+// rather than registering a bind that can never fire.
+uint32_t parseButtonName(lua_State* L, int idx) {
+    if(lua_isnumber(L, idx)) {
+        return static_cast<uint32_t>(lua_tointeger(L, idx));
+    }
+    std::string b = luaL_checkstring(L, idx);
+    if(b == "left" || b == "BTN_LEFT") { return BTN_LEFT; }
+    if(b == "right" || b == "BTN_RIGHT") { return BTN_RIGHT; }
+    if(b == "middle" || b == "BTN_MIDDLE") { return BTN_MIDDLE; }
+    if(b == "side" || b == "BTN_SIDE") { return BTN_SIDE; }
+    if(b == "extra" || b == "BTN_EXTRA") { return BTN_EXTRA; }
+    return 0;
 }
 
 template <typename T>
@@ -640,6 +661,31 @@ int l_client_resize(lua_State* L) {
     return 0;
 }
 
+// c:begin_move() / c:begin_resize() -- kick the compositor into an
+// interactive drag-move/drag-resize grab for this client, the same grab
+// XdgToplevel::handleRequestMove/handleRequestResize enter when a
+// client's own CSD asks for one. Meant to be called from a
+// uwu.mousebind() closure so rc.lua decides *when* a drag starts (which
+// modifier+button combo) rather than it being hardwired into the button
+// handler. Both are quiet no-ops on a tiled or fullscreen client (see
+// View::beginInteractiveMove/Resize's own guard) rather than the loud
+// luaL_error move()/resize() above use -- a mousebind fires on whatever's
+// under the cursor, tiled or floating, and that's the expected common
+// case rather than a mistake worth erroring over. begin_resize() doesn't
+// take edges: it picks them from which quadrant of the window the cursor
+// is currently over, see View::beginInteractiveResizeFromCursor.
+int l_client_begin_move(lua_State* L) {
+    View* view = checkClient(L, 1);
+    view->beginMoveFromMousebind();
+    return 0;
+}
+
+int l_client_begin_resize(lua_State* L) {
+    View* view = checkClient(L, 1);
+    view->beginResizeFromMousebind();
+    return 0;
+}
+
 const luaL_Reg kClientMethods[] = {
     {"focus",          l_client_focus         },
     {"kill",           l_client_kill          },
@@ -649,6 +695,8 @@ const luaL_Reg kClientMethods[] = {
     {"move_to_output", l_client_move_to_output},
     {"move",           l_client_move          },
     {"resize",         l_client_resize        },
+    {"begin_move",     l_client_begin_move    },
+    {"begin_resize",   l_client_begin_resize  },
     {nullptr,          nullptr                },
 };
 
@@ -869,6 +917,32 @@ int l_bind(lua_State* L) {
     cfg->keybinds.insert({
         static_cast<uint32_t>(sym), {mods, static_cast<uint32_t>(sym), ref}
     });
+    return 0;
+}
+
+// uwu.mousebind(mods, button, fn) -- see LuaMousebind's doc comment in
+// lua_config.hpp. `fn` is called as fn(client) -- the view under the
+// cursor when the bound button+modifier combo is pressed -- typically to
+// call client:begin_move() or client:begin_resize(). Same "log and skip
+// rather than luaL_error" treatment l_bind gives an unknown key name: one
+// typo'd button name in rc.lua shouldn't silently discard every mousebind
+// that follows it in the file.
+int l_mousebind(lua_State* L) {
+    uint32_t mods   = parseModTable(L, 1);
+    uint32_t button = parseButtonName(L, 2);
+    luaL_checktype(L, 3, LUA_TFUNCTION);
+
+    if(button == 0) {
+        wlr_log(WLR_ERROR,
+                "uwu.mousebind: unknown button name, skipping this binding");
+        return 0;
+    }
+
+    lua_pushvalue(L, 3);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+
+    LuaConfig* cfg = getConfig(L);
+    cfg->mousebinds.push_back({mods, button, ref});
     return 0;
 }
 
@@ -2171,6 +2245,7 @@ const luaL_Reg kBehaviorFuncs[] = {
 const luaL_Reg kuwuwmFuncs[] = {
     {"spawn",             l_spawn            },
     {"bind",              l_bind             },
+    {"mousebind",         l_mousebind        },
     {"set",               l_set              },
     {"get",               l_get              },
     {"quit",              l_quit             },
@@ -2572,6 +2647,22 @@ void LuaConfig::invoke(int fn_ref) {
     }
 }
 
+void LuaConfig::invokeWithClient(int fn_ref, View* view) {
+    lua_rawgeti(L, LUA_REGISTRYINDEX, fn_ref);
+    pushClient(L, view);
+    guardedCall(1);
+
+    // Same deferred-reload handling as invoke() above -- a mousebind
+    // closure is just as free to call uwu.reload() as a regular keybind
+    // is, and needs the same "wait until the Lua call stack is empty"
+    // treatment.
+    if(reload_pending) {
+        wlr_log(WLR_INFO, "deferred reload requested from mousebind callback");
+        reload_pending = false;
+        server_->reloadConfig();
+    }
+}
+
 void LuaConfig::fireClientEvent(const std::string& event, View* view) {
     // Copy the ids of hooks registered for this event *before* invoking
     // any of them -- a hook is free to call uwu.unhook() on itself or on
@@ -2649,6 +2740,7 @@ bool LuaConfig::reload() {
     // include losing the very reload keybind you just used to get here.
     lua_State*                          old_L        = L;
     std::multimap<uint32_t, LuaKeybind> old_keybinds = std::move(keybinds);
+    std::vector<LuaMousebind>           old_mousebinds = std::move(mousebinds);
     std::vector<MonitorRule>            old_rules    = std::move(monitor_rules);
     std::vector<InputRule>     old_input_rules       = std::move(input_rules);
     std::vector<WallpaperRule> old_wallpaper_rules = std::move(wallpaper_rules);
@@ -2657,6 +2749,7 @@ bool LuaConfig::reload() {
     int                        old_next_hook_id    = next_hook_id;
 
     keybinds.clear();
+    mousebinds.clear();
     monitor_rules.clear();
     input_rules.clear();
     wallpaper_rules.clear();
@@ -2671,9 +2764,11 @@ bool LuaConfig::reload() {
     if(ok) {
         if(old_L) { lua_close(old_L); }
         wlr_log(WLR_INFO,
-                "rc.lua reload ok: %zu keybind(s), %zu monitor rule(s), "
+                "rc.lua reload ok: %zu keybind(s), %zu mousebind(s), "
+                "%zu monitor rule(s), "
                 "%zu input rule(s), %zu wallpaper rule(s), %zu hook(s)",
                 keybinds.size(),
+                mousebinds.size(),
                 monitor_rules.size(),
                 input_rules.size(),
                 wallpaper_rules.size(),
@@ -2682,6 +2777,7 @@ bool LuaConfig::reload() {
         if(L) { lua_close(L); }
         L               = old_L;
         keybinds        = std::move(old_keybinds);
+        mousebinds      = std::move(old_mousebinds);
         monitor_rules   = std::move(old_rules);
         input_rules     = std::move(old_input_rules);
         wallpaper_rules = std::move(old_wallpaper_rules);

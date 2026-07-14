@@ -1,467 +1,553 @@
+diff --git a/lib/meta/uwu.lua b/lib/meta/uwu.lua
+index 3f310c9..d46e088 100644
+--- a/lib/meta/uwu.lua
++++ b/lib/meta/uwu.lua
+@@ -51,6 +51,27 @@ function uwu.reload() end
+ ---@param fn fun()
+ function uwu.bind(mods, key, fn) end
+
++---Registers a mousebind: `mods` (same names as uwu.bind above) plus a
++---pointer button -- "left"/"right"/"middle"/"side"/"extra" (or a raw
++---BTN_* evdev name/number) -- pressed while the cursor is over a client.
++---`fn` is called as `fn(client)` with that client, and the whole click is
++---consumed by the compositor (not forwarded to the app underneath) if a
++---bind matches. This is what floating-window drag-move/drag-resize is
++---built on -- sway/i3's floating_modifier equivalent:
++---
++---    uwu.mousebind({"mod"}, "left", function(c) c:begin_move() end)
++---    uwu.mousebind({"mod"}, "right", function(c) c:begin_resize() end)
++---
++---Both begin_move()/begin_resize() are silent no-ops on a tiled or
++---fullscreen client -- a mousebind fires on whatever's under the cursor,
++---so no error just because that happens to not be floating right now. An
++---unknown button name is logged and skipped, same as an unknown key name
++---in uwu.bind above.
++---@param mods string[]
++---@param button string
++---@param fn fun(client: Client)
++function uwu.mousebind(mods, button, fn) end
++
+ -- ── settings ─────────────────────────────────────────────────────────────
+
+ ---@deprecated Use uwu.visual.set() (7 appearance fields) or
+@@ -424,6 +445,20 @@ function Client:move(x, y) end
+ ---@param height integer
+ function Client:resize(width, height) end
+
++---Starts an interactive drag-move grab for this client -- the mouse
++---equivalent of dragging a titlebar, driven by cursor motion instead of
++---an absolute (x, y). Meant to be called from a uwu.mousebind() closure.
++---Silent no-op on a tiled or fullscreen client.
++function Client:begin_move() end
++
++---Starts an interactive drag-resize grab for this client. Which edges
++---grow/shrink is picked from which quadrant of the window the cursor was
++---over when the bind fired (left half drags the left edge, top half
++---drags the top edge, etc), the same convention i3/sway's
++---floating_modifier resize-drag uses. Meant to be called from a
++---uwu.mousebind() closure. Silent no-op on a tiled or fullscreen client.
++function Client:begin_resize() end
++
+ ---@class uwu.client
+ uwu.client = {}
+
 diff --git a/lib/paw/init.lua b/lib/paw/init.lua
-index cc9c01d..c63371e 100644
+index 711f7f0..30fc704 100644
 --- a/lib/paw/init.lua
 +++ b/lib/paw/init.lua
-@@ -302,4 +302,354 @@ function paw.on(event, fn)
- end
- paw.off = uwu.unhook
-
-+-- ── workspaces ───────────────────────────────────────────────────────────
-+-- paw.workspace -- a friendlier name for what the C side calls a "tag"
-+-- (see output.hpp's comment on Output::tagset: one flat, 9-bit set of
-+-- tags shared across every output -- Awesome/dwm-style, not a separate
-+-- per-monitor workspace list). paw.tags(fn) above already loops
-+-- 1..uwu.tag_count for building keybind blocks; paw.workspace wraps the
-+-- actual uwu.tag.* actions the same way paw.layout wraps uwu.layout.*,
-+-- plus optional human names for anyone who'd rather bind mod+w than
-+-- remember "tag 4 is always chat".
-+paw.workspace = {
-+  -- paw.workspace.go(n) / .toggle(n) / .move_focused_to(n) -- 1-based,
-+  -- straight passthroughs to uwu.tag.view/toggle/move_client_here. `n`
-+  -- may also be a name previously registered via paw.workspace.names().
-+  go = function(n)
-+    return uwu.tag.view(paw.workspace.resolve(n))
-+  end,
-+  toggle = function(n)
-+    return uwu.tag.toggle(paw.workspace.resolve(n))
-+  end,
-+  move_focused_to = function(n)
-+    return uwu.tag.move_client_here(paw.workspace.resolve(n))
-+  end,
-+  close_all = function(n)
-+    return uwu.tag.close_all(paw.workspace.resolve(n))
-+  end,
+@@ -298,6 +298,32 @@ paw.client = {
+     end
+     c:resize(c.geo.width + dw, c.geo.height + dh)
+   end,
 +
-+  -- paw.workspace.current([output_name]) -> raw tagset bitmask (see
-+  -- uwu.tag.current -- the read-side counterpart to view/toggle, which
-+  -- only ever wrote a tagset before now). Defaults to the focused
-+  -- output when `output_name` is omitted.
-+  current = function(output_name)
-+    return uwu.tag.current(output_name)
-+  end,
-+
-+  -- paw.workspace.current_indices([output_name]) -> array of 1-based
-+  -- tag numbers currently visible, decoded from current()'s bitmask.
-+  -- Most setups only ever show one at a time, but uwu.tag.toggle can
-+  -- put an output on several simultaneously, so this is a list rather
-+  -- than a single number.
-+  current_indices = function(output_name)
-+    local mask = uwu.tag.current(output_name)
-+    local out  = {}
-+    if not mask then
-+      return out
++  -- paw.client.begin_move()/begin_resize() -- keyboard-armed version of
++  -- the c:begin_move()/c:begin_resize() grabs uwu.mousebind() closures
++  -- normally call: a keybind (e.g. mod+z/mod+x) arms the grab on the
++  -- *focused* client instead of whatever's under the cursor at press
++  -- time, then ordinary mouse motion drives it exactly like a
++  -- mousebind-started drag would -- the grab doesn't care how it got
++  -- armed, only that cursor_mode is now Move/Resize (see
++  -- processCursorMotion in input.cpp). Ends the same way too: click any
++  -- button to drop it. No-op (not an error) with no focused client, same
++  -- reasoning move()/resize() above give; begin_move()/begin_resize()
++  -- themselves are already silent no-ops on a tiled/fullscreen client.
++  begin_move = function()
++    local c = uwu.client.focused()
++    if not c then
++      return
 +    end
-+    for i = 1, uwu.tag_count do
-+      if (mask & (1 << (i - 1))) ~= 0 then
-+        table.insert(out, i)
-+      end
-+    end
-+    return out
++    c:begin_move()
 +  end,
-+
-+  -- paw.workspace.each(fn) -- alias of paw.tags(fn); kept as its own
-+  -- name under paw.workspace so everything workspace-shaped lives under
-+  -- one table instead of half living on bare paw.
-+  each = paw.tags,
-+
-+  -- paw.workspace.on_change(fn) -- alias of paw.on("tags_changed", fn):
-+  -- fn receives (monitor_name, new_tagset) whenever any output's
-+  -- visible tagset changes, from any source (a keybind, a rule's
-+  -- apply.tag, monitor unplug migration -- see setTagset's own comment
-+  -- in output.cpp for why every path funnels through one place).
-+  on_change = function(fn)
-+    return paw.on('tags_changed', fn)
++  begin_resize = function()
++    local c = uwu.client.focused()
++    if not c then
++      return
++    end
++    c:begin_resize()
 +  end,
-+}
-+
-+-- paw.workspace.names({ [1] = "web", [2] = "code", [3] = "chat" }) --
-+-- optional; lets go/toggle/move_focused_to/close_all above take a name
-+-- instead of remembering raw tag numbers. Purely a Lua-side lookup
-+-- table -- the C side and uwu.tag.* never see anything but the
-+-- resolved 1-based integer, so this is safe to skip entirely if you're
-+-- happy with bare numbers (paw.workspace.resolve(n) is a no-op for
-+-- anything that's already a number).
-+local workspace_names = {}
-+
-+function paw.workspace.names(map)
-+  for name, n in pairs(map or {}) do
-+    workspace_names[name] = n
-+  end
-+end
-+
-+function paw.workspace.resolve(n)
-+  if type(n) == 'number' then
-+    return n
-+  end
-+  local resolved = workspace_names[n]
-+  if not resolved then
-+    error("paw.workspace: no such workspace name '" .. tostring(n) .. "'")
-+  end
-+  return resolved
-+end
-+
-+-- ── special workspaces (scratchpads) ────────────────────────────────────
-+-- paw.specialworkspace -- Hyprland-style named scratchpads. There's no
-+-- spare "special" tag at the C level to dedicate to this (all 9 tag
-+-- bits are ordinary, user-visible tags -- see the paw.workspace comment
-+-- above), so a special workspace is built entirely out of primitives
-+-- that already exist for other reasons:
-+--
-+--   * client.minimized (View::setMinimized, view.cpp) -- scene-disables
-+--     the client and drops it out of tiling/focus order while hidden,
-+--     without touching its output/tags/geo, so hiding and re-showing a
-+--     scratchpad is cheap and keeps whatever state it had.
-+--   * client.floating -- a scratchpad is always a floating overlay, never
-+--     tiled into the layout.
-+--   * client:set_tags_mask(mask) + uwu.tag.current() -- every time a
-+--     scratchpad is *shown*, it's re-tagged onto the exact live tagset of
-+--     the focused output first. That's what makes it follow you: toggle
-+--     it on from tag 2, it's on tag 2; switch to tag 5 and toggle it on
-+--     again, it's now on tag 5 too -- always an overlay on whatever
-+--     you're actually looking at, never a fixed "home" tag you have to
-+--     go find it on.
-+--
-+-- Usage:
-+--   paw.specialworkspace.set("term", {
-+--     spawn = "wezterm start --class scratch_term",
-+--     match = { app_id = "scratch_term" },
-+--     size  = { width = 0.6, height = 0.5 }, -- fraction of output size
-+--   })
-+--   uwu.bind({"mod"}, "grave", function()
-+--     paw.specialworkspace.toggle("term")
-+--   end)
-+--
-+-- `spawn`/`match` are optional -- paw.specialworkspace.move_focused(name)
-+-- claims whatever client is currently focused into a named scratchpad
-+-- with no pre-registered command at all, for one-off ad hoc use.
-+paw.specialworkspace = {}
-+
-+-- name -> { spawn, match, size, clients = {[id]=true}, spawning }
-+local sw_defs = {}
-+-- client id -> name, so hooks/cleanup don't have to scan every def
-+local sw_owner = {}
-+
-+local function sw_def(name)
-+  sw_defs[name] = sw_defs[name] or { clients = {} }
-+  return sw_defs[name]
-+end
-+
-+-- paw.specialworkspace.set(name, { spawn, match, size }) -- registers or
-+-- updates a scratchpad definition. Calling it again with a running
-+-- instance already claimed doesn't disturb that instance; it only
-+-- changes what a *future* spawn/match/reveal uses.
-+function paw.specialworkspace.set(name, opts)
-+  opts = opts or {}
-+  local def  = sw_def(name)
-+  def.spawn  = opts.spawn
-+  def.match  = opts.match
-+  def.size   = opts.size
-+end
-+
-+local function sw_matches(c, match)
-+  if not match then
-+    return false
-+  end
-+  if match.app_id and c.app_id ~= match.app_id then
-+    return false
-+  end
-+  if match.title and not string.find(c.title, match.title) then
-+    return false
-+  end
-+  return true
-+end
-+
-+-- Finds the live Client belonging to `name`, if its window is still
-+-- open. def.clients may still list ids for windows that have since
-+-- closed (cleaned up lazily by the closes-hook below, not synchronously
-+-- here) -- iterating uwu.client.list() rather than trusting the id
-+-- table directly means a stale id just silently matches nothing instead
-+-- of needing its own liveness check.
-+local function sw_find(name)
-+  local def = sw_defs[name]
-+  if not def then
-+    return nil
-+  end
-+  for _, c in ipairs(uwu.client.list()) do
-+    if def.clients[c.id] then
-+      return c
-+    end
-+  end
-+  return nil
-+end
-+
-+local function sw_focused_monitor()
-+  local out = nil
-+  paw.monitor.each(function(m)
-+    if m.focused then
-+      out = m
-+    end
-+  end)
-+  return out
-+end
-+
-+-- Claims `c` into scratchpad `name` and makes it visible: floats it,
-+-- applies def.size (if any) relative to the focused output, re-tags it
-+-- onto that output's exact live tagset, un-minimizes, and focuses it.
-+-- This is the one place that actually shows a scratchpad -- toggle/show
-+-- below both funnel through here.
-+local function sw_reveal(c, name)
-+  local def = sw_def(name)
-+  sw_owner[c.id]    = name
-+  def.clients[c.id] = true
-+
-+  if not c.floating then
-+    c.floating = true
-+  end
-+
-+  if def.size then
-+    local out = sw_focused_monitor()
-+    if out then
-+      local w = math.floor(out.width * (def.size.width or 0.5))
-+      local h = math.floor(out.height * (def.size.height or 0.5))
-+      c:resize(w, h)
-+      c:move(
-+        out.x + math.floor((out.width - w) / 2),
-+        out.y + math.floor((out.height - h) / 2)
-+      )
-+    end
-+  end
-+
-+  local mask = uwu.tag.current()
-+  if mask then
-+    c:set_tags_mask(mask)
-+  end
-+
-+  c.minimized = false
-+  c:focus()
-+end
-+
-+-- Catches every newly-mapped client, not just scratchpad ones -- most
-+-- fall through both checks below and cost one pairs() scan over
-+-- sw_defs, which stays tiny (a handful of named scratchpads at most).
-+-- Two cases:
-+--   1. def.spawning is true -- paw.specialworkspace.toggle() just ran
-+--      uwu.spawn(def.spawn) and is waiting for the resulting window to
-+--      map. Claim it and reveal it immediately.
-+--   2. Not spawning, but it matches def.match anyway (e.g. the app was
-+--      already running and just opened a second window, or it was
-+--      launched some other way entirely). Claim it but leave it hidden
-+--      -- an unprompted new scratchpad window popping up unminimized
-+--      would be surprising; the next explicit toggle()/show() reveals
-+--      it same as any other claimed instance.
-+uwu.hook('client::manage', function(c)
-+  for name, def in pairs(sw_defs) do
-+    if not sw_owner[c.id] and def.match and sw_matches(c, def) then
-+      sw_owner[c.id]    = name
-+      def.clients[c.id] = true
-+      if def.spawning then
-+        def.spawning = false
-+        sw_reveal(c, name)
-+      else
-+        c.floating  = true
-+        c.minimized = true
-+      end
-+      break
-+    end
-+  end
-+end)
-+
-+-- Lazily forgets a closed client's id instead of leaving it in
-+-- def.clients forever -- harmless correctness-wise (sw_find only ever
-+-- matches against currently-open clients), but this keeps the table
-+-- from growing without bound across a long uptime with lots of
-+-- ephemeral scratchpad instances (e.g. a scratchpad terminal that gets
-+-- closed and respawned many times in a session).
-+uwu.hook('client::unmanage', function(c)
-+  local name = sw_owner[c.id]
-+  if name and sw_defs[name] then
-+    sw_defs[name].clients[c.id] = nil
-+  end
-+  sw_owner[c.id] = nil
-+end)
-+
-+-- paw.specialworkspace.toggle(name) -- the main entry point. No running
-+-- instance and no def.spawn -- errors if `name` was never registered
-+-- via .set() (a typo'd name should fail loudly, same reasoning as
-+-- l_client_newindex's rejection of unknown client properties); a
-+-- registered-but-spawnless def with no running instance is a silent
-+-- no-op, since there's nothing to reveal and nothing to launch.
-+function paw.specialworkspace.toggle(name)
-+  local def = sw_defs[name]
-+  if not def then
-+    error(
-+      "paw.specialworkspace: no definition for '"
-+        .. tostring(name)
-+        .. "' -- call paw.specialworkspace.set() first"
-+    )
-+  end
-+
-+  local c = sw_find(name)
-+  if c then
-+    if c.minimized then
-+      sw_reveal(c, name)
-+    else
-+      c.minimized = true
-+    end
-+    return
-+  end
-+
-+  if def.spawn then
-+    def.spawning = true
-+    uwu.spawn(def.spawn)
-+  end
-+end
-+
-+-- paw.specialworkspace.show(name) / .hide(name) -- non-toggling
-+-- versions, for binds that want "always bring to front" / "always
-+-- dismiss" rather than a flip-flop (e.g. a hook that shows a scratchpad
-+-- on some external event, where re-triggering it mid-session shouldn't
-+-- hide an already-visible one).
-+function paw.specialworkspace.show(name)
-+  local def = sw_defs[name]
-+  if not def then
-+    error(
-+      "paw.specialworkspace: no definition for '"
-+        .. tostring(name)
-+        .. "' -- call paw.specialworkspace.set() first"
-+    )
-+  end
-+  local c = sw_find(name)
-+  if c then
-+    sw_reveal(c, name)
-+  elseif def.spawn then
-+    def.spawning = true
-+    uwu.spawn(def.spawn)
-+  end
-+end
-+
-+function paw.specialworkspace.hide(name)
-+  local c = sw_find(name)
-+  if c then
-+    c.minimized = true
-+  end
-+end
-+
-+-- paw.specialworkspace.move_focused(name) -- ad hoc scratchpad use with
-+-- no paw.specialworkspace.set() definition at all: grabs whatever
-+-- client is currently focused and claims/reveals it under `name` on the
-+-- spot. A later paw.specialworkspace.toggle(name)/hide(name) then works
-+-- on it same as a spawn-configured one, just without a `spawn` to fall
-+-- back on if it gets closed.
-+function paw.specialworkspace.move_focused(name)
-+  local c = uwu.client.focused()
-+  if not c then
-+    return
-+  end
-+  sw_reveal(c, name)
-+end
-+
- return paw
-diff --git a/src/lua_config.cpp b/src/lua_config.cpp
-index 3e4c2a5..3f61e27 100644
---- a/src/lua_config.cpp
-+++ b/src/lua_config.cpp
-@@ -563,6 +563,22 @@ int l_client_toggle_tag(lua_State* L) {
-     return 0;
  }
 
-+// c:set_tags_mask(mask) -- like set_tag(n), but takes the raw 0-indexed
-+// bitmask View::tags/setTags() already use internally (same value
-+// `client.tags` already reads back) instead of a single 1-based index.
-+// set_tag/toggle_tag cover the common single-active-tag case; this is
-+// the escape hatch for anything that needs to land a client on
-+// whatever *combination* of tags is currently visible (e.g. a
-+// multi-tag view via uwu.tag.toggle, or paw.specialworkspace re-tagging
-+// a scratchpad client onto the target output's exact live tagset rather
-+// than guessing at a single tag within it).
-+int l_client_set_tags_mask(lua_State* L) {
-+    View*    view = checkClient(L, 1);
-+    uint32_t mask = static_cast<uint32_t>(luaL_checkinteger(L, 2));
-+    view->setTags(mask);
+ -- ── keybinds ─────────────────────────────────────────────────────────────
+diff --git a/rc.lua b/rc.lua
+index af255e5..0d2a44b 100644
+--- a/rc.lua
++++ b/rc.lua
+@@ -254,6 +254,17 @@ local keys = {
+     end,
+     'shrink floating window height',
+   },
++
++  -- Keyboard-armed move/resize -- mod+z arms an interactive drag-move on
++  -- the focused client, mod+x arms drag-resize; move the mouse to
++  -- actually move/resize it, click any button to drop it. Same grab
++  -- mod+drag/mod+right-drag start below (see uwu.mousebind() calls near
++  -- the end of this file), just armed by a key on the focused client
++  -- instead of a click on whatever's under the cursor. No-op with
++  -- nothing focused, or on a tiled/fullscreen client.
++  { mod, 'z', paw.client.begin_move, 'keyboard-arm drag-move (mouse to move, click to drop)' },
++  { mod, 'x', paw.client.begin_resize, 'keyboard-arm drag-resize (mouse to resize, click to drop)' },
++
+   {
+     mod,
+     'i',
+@@ -425,6 +436,23 @@ end)
+
+ paw.keys(keys)
+
++-- Floating-window drag-move/drag-resize -- sway/i3's floating_modifier
++-- equivalent. Hold `mod` and drag with the left button anywhere on a
++-- floating client (not just a titlebar -- there isn't one) to move it;
++-- mod+right-drag resizes it, picking which edge grows/shrinks from
++-- whichever quadrant of the window the cursor was over when the drag
++-- started. Both are silent no-ops on a tiled/fullscreen client, same as
++-- the mod+alt nudge binds above -- click-dragging something that isn't
++-- floating yet does nothing until mod+space has floated it first. See
++-- mod+z/mod+x above for a keyboard-armed version of the same grab that
++-- doesn't need a click to start it.
++uwu.mousebind({ 'mod' }, 'left', function(c)
++  c:begin_move()
++end)
++uwu.mousebind({ 'mod' }, 'right', function(c)
++  c:begin_resize()
++end)
++
+ -- uwu.tag.close_all(n) gracefully closes every window on tag n --
+ -- destructive, so it's deliberately not bound to a key here. Wire it up
+ -- yourself if you want it, e.g. a dedicated "close everything on tag 9"
+diff --git a/src/input.cpp b/src/input.cpp
+index 23daca6..13af9d2 100644
+--- a/src/input.cpp
++++ b/src/input.cpp
+@@ -640,13 +640,24 @@ void setupCursor(Server& server) {
+         [&server](wlr_pointer_button_event* event) {
+             notifyIdleActivity(server);
+
+-            wlr_seat_pointer_notify_button(
+-                server.seat, event->time_msec, event->button, event->state);
+-
+             if(event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
++                bool was_mousebind_grab = server.mousebind_grab_active;
+                 if(server.cursor_mode != CursorMode::Passthrough) {
+                     resetCursorMode(server);
+                 }
++                if(was_mousebind_grab) {
++                    // This press was consumed by a uwu.mousebind() grab
++                    // below and never reached the client (see the
++                    // PRESSED branch) -- the matching release shouldn't
++                    // either, or an app would see a lone button-up with
++                    // no preceding button-down. A client-initiated grab
++                    // (request_move/request_resize) *did* see its press
++                    // via the ordinary path below, so its release still
++                    // gets forwarded same as before.
++                    return;
++                }
++                wlr_seat_pointer_notify_button(
++                    server.seat, event->time_msec, event->button, event->state);
+                 return;
+             }
+
+@@ -654,6 +665,35 @@ void setupCursor(Server& server) {
+             double       sx, sy;
+             View*        v = desktopViewAt(
+                 server, server.cursor->x, server.cursor->y, &surface, &sx, &sy);
++
++            // uwu.mousebind() -- floating-window drag-move/drag-resize,
++            // sway/i3's floating_modifier equivalent. Checked before the
++            // click is forwarded to the client: a matching bind grabs the
++            // whole click for the compositor (focuses the view, invokes
++            // the bound Lua closure -- typically client:begin_move() or
++            // client:begin_resize() -- and stops there) instead of *also*
++            // sending it on to whatever's under the cursor, same reason
++            // sway doesn't let a modifier-drag also draw a text selection
++            // in the app underneath it.
++            if(v && !v->unmanaged) {
++                uint32_t mods_state = 0;
++                if(wlr_keyboard* kb = wlr_seat_get_keyboard(server.seat)) {
++                    mods_state =
++                        wlr_keyboard_get_modifiers(kb) & kBindableMods;
++                }
++                for(const auto& mb : server.lua_cfg.mousebinds) {
++                    if(mb.mods == mods_state && mb.button == event->button) {
++                        server.focusView(v);
++                        server.mousebind_grab_active = true;
++                        server.lua_cfg.invokeWithClient(mb.fn_ref, v);
++                        return;
++                    }
++                }
++            }
++
++            wlr_seat_pointer_notify_button(
++                server.seat, event->time_msec, event->button, event->state);
++
+             // Unmanaged (X11 override-redirect) windows -- menus,
+             // tooltips, DND icons -- don't take keyboard focus on click,
+             // same as every other compositor.
+@@ -776,8 +816,9 @@ void processCursorMotion(Server& server, uint32_t time_msec) {
+ }
+
+ void resetCursorMode(Server& server) {
+-    server.cursor_mode  = CursorMode::Passthrough;
+-    server.grabbed_view = nullptr;
++    server.cursor_mode          = CursorMode::Passthrough;
++    server.grabbed_view         = nullptr;
++    server.mousebind_grab_active = false;
+ }
+
+ bool shortcutsInhibited(Server& server) {
+diff --git a/src/lua_config.cpp b/src/lua_config.cpp
+index 3f61e27..ef1fc4e 100644
+--- a/src/lua_config.cpp
++++ b/src/lua_config.cpp
+@@ -9,6 +9,7 @@ extern "C" {
+
+ #include <lauxlib.h>
+ #include <libinput.h>
++#include <linux/input-event-codes.h>
+ #include <lua.h>
+ #include <lualib.h>
+ #include <sys/wait.h>
+@@ -162,6 +163,26 @@ uint32_t parseModTable(lua_State* L, int idx) {
+     return mods;
+ }
+
++// Parses a uwu.mousebind() button argument: "left"/"right"/"middle" (the
++// common case), the underlying BTN_LEFT/BTN_RIGHT/BTN_MIDDLE evdev name if
++// someone wants to be explicit, or a bare number for anything else (e.g. a
++// side button whose code isn't worth naming here). Returns 0 -- never a
++// real evdev button code -- on anything unrecognized, which l_mousebind
++// below logs and skips (same treatment l_bind gives an unknown key name)
++// rather than registering a bind that can never fire.
++uint32_t parseButtonName(lua_State* L, int idx) {
++    if(lua_isnumber(L, idx)) {
++        return static_cast<uint32_t>(lua_tointeger(L, idx));
++    }
++    std::string b = luaL_checkstring(L, idx);
++    if(b == "left" || b == "BTN_LEFT") { return BTN_LEFT; }
++    if(b == "right" || b == "BTN_RIGHT") { return BTN_RIGHT; }
++    if(b == "middle" || b == "BTN_MIDDLE") { return BTN_MIDDLE; }
++    if(b == "side" || b == "BTN_SIDE") { return BTN_SIDE; }
++    if(b == "extra" || b == "BTN_EXTRA") { return BTN_EXTRA; }
 +    return 0;
 +}
 +
- int l_client_move_to_output(lua_State* L) {
-     View*       view   = checkClient(L, 1);
-     const char* name   = luaL_checkstring(L, 2);
-@@ -629,6 +645,7 @@ const luaL_Reg kClientMethods[] = {
-     {"kill",           l_client_kill          },
-     {"set_tag",        l_client_set_tag       },
-     {"toggle_tag",     l_client_toggle_tag    },
-+    {"set_tags_mask",  l_client_set_tags_mask },
-     {"move_to_output", l_client_move_to_output},
-     {"move",           l_client_move          },
-     {"resize",         l_client_resize        },
-@@ -676,6 +693,10 @@ int l_client_index(lua_State* L) {
-         lua_pushboolean(L, view->is_fullscreen);
-         return 1;
-     }
-+    if(k == "minimized") {
-+        lua_pushboolean(L, view->is_minimized);
-+        return 1;
-+    }
-     if(k == "output") {
-         if(view->output) {
-             lua_pushstring(L, view->output->wlr_output->name);
-@@ -755,6 +776,10 @@ int l_client_newindex(lua_State* L) {
-         view->setFullscreen(lua_toboolean(L, 3));
-         return 0;
-     }
-+    if(k == "minimized") {
-+        view->setMinimized(lua_toboolean(L, 3));
-+        return 0;
-+    }
-     if(k == "opacity") {
-         view->has_opacity_override = true;
-         view->opacity_override     = static_cast<float>(luaL_checknumber(L, 3));
-@@ -1149,6 +1174,34 @@ int l_close_all_on_tag(lua_State* L) {
+ template <typename T>
+ void getOptionalField(
+     lua_State* L, int table_idx, const char* field, T& out, bool& has_value) {
+@@ -640,6 +661,31 @@ int l_client_resize(lua_State* L) {
      return 0;
  }
 
-+// uwu.tag.current([output_name]) -> raw tagset bitmask (the same value
-+// View::tags/client.tags/set_tags_mask() use) currently visible on
-+// `output_name`, or the focused output if omitted. nil if that output
-+// doesn't exist (or nothing's focused yet). This is the read side of
-+// what setTagset()/l_view_tag write -- exposed on its own because
-+// nothing before now needed to *read back* a tagset from Lua, only ever
-+// set one.
-+int l_tag_current(lua_State* L) {
-+    Server*     server = getServer(L);
-+    const char* name   = lua_isstring(L, 1) ? lua_tostring(L, 1) : nullptr;
-+    Output*     out    = server->focused_output;
-+    if(name) {
-+        out = nullptr;
-+        for(auto& o : server->outputs) {
-+            if(name == o->wlr_output->name) {
-+                out = o.get();
-+                break;
-+            }
-+        }
-+    }
-+    if(!out) {
-+        lua_pushnil(L);
-+    } else {
-+        lua_pushinteger(L, out->tagset);
-+    }
-+    return 1;
++// c:begin_move() / c:begin_resize() -- kick the compositor into an
++// interactive drag-move/drag-resize grab for this client, the same grab
++// XdgToplevel::handleRequestMove/handleRequestResize enter when a
++// client's own CSD asks for one. Meant to be called from a
++// uwu.mousebind() closure so rc.lua decides *when* a drag starts (which
++// modifier+button combo) rather than it being hardwired into the button
++// handler. Both are quiet no-ops on a tiled or fullscreen client (see
++// View::beginInteractiveMove/Resize's own guard) rather than the loud
++// luaL_error move()/resize() above use -- a mousebind fires on whatever's
++// under the cursor, tiled or floating, and that's the expected common
++// case rather than a mistake worth erroring over. begin_resize() doesn't
++// take edges: it picks them from which quadrant of the window the cursor
++// is currently over, see View::beginInteractiveResizeFromCursor.
++int l_client_begin_move(lua_State* L) {
++    View* view = checkClient(L, 1);
++    view->beginMoveFromMousebind();
++    return 0;
 +}
 +
- int l_focus_monitor(lua_State* L) {
-     int     dir    = static_cast<int>(luaL_optinteger(L, 1, 1));
-     Server* server = getServer(L);
-@@ -1689,6 +1742,8 @@ int l_monitor_list(lua_State* L) {
-         }
-         lua_pushboolean(L, server->focused_output == out.get());
-         lua_setfield(L, -2, "focused");
-+        lua_pushinteger(L, out->tagset);
-+        lua_setfield(L, -2, "tagset");
-         lua_rawseti(L, -2, i++);
-     }
-     return 1;
-@@ -2082,6 +2137,7 @@ const luaL_Reg kTagFuncs[] = {
-     {"toggle",           l_toggle_tag      },
-     {"move_client_here", l_move_to_tag     },
-     {"close_all",        l_close_all_on_tag},
-+    {"current",          l_tag_current     },
-     {nullptr,            nullptr           },
++int l_client_begin_resize(lua_State* L) {
++    View* view = checkClient(L, 1);
++    view->beginResizeFromMousebind();
++    return 0;
++}
++
+ const luaL_Reg kClientMethods[] = {
+     {"focus",          l_client_focus         },
+     {"kill",           l_client_kill          },
+@@ -649,6 +695,8 @@ const luaL_Reg kClientMethods[] = {
+     {"move_to_output", l_client_move_to_output},
+     {"move",           l_client_move          },
+     {"resize",         l_client_resize        },
++    {"begin_move",     l_client_begin_move    },
++    {"begin_resize",   l_client_begin_resize  },
+     {nullptr,          nullptr                },
  };
+
+@@ -872,6 +920,32 @@ int l_bind(lua_State* L) {
+     return 0;
+ }
+
++// uwu.mousebind(mods, button, fn) -- see LuaMousebind's doc comment in
++// lua_config.hpp. `fn` is called as fn(client) -- the view under the
++// cursor when the bound button+modifier combo is pressed -- typically to
++// call client:begin_move() or client:begin_resize(). Same "log and skip
++// rather than luaL_error" treatment l_bind gives an unknown key name: one
++// typo'd button name in rc.lua shouldn't silently discard every mousebind
++// that follows it in the file.
++int l_mousebind(lua_State* L) {
++    uint32_t mods   = parseModTable(L, 1);
++    uint32_t button = parseButtonName(L, 2);
++    luaL_checktype(L, 3, LUA_TFUNCTION);
++
++    if(button == 0) {
++        wlr_log(WLR_ERROR,
++                "uwu.mousebind: unknown button name, skipping this binding");
++        return 0;
++    }
++
++    lua_pushvalue(L, 3);
++    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
++
++    LuaConfig* cfg = getConfig(L);
++    cfg->mousebinds.push_back({mods, button, ref});
++    return 0;
++}
++
+ // Category-scoped setter/getter core, shared by uwu.visual.set/get and
+ // uwu.behavior.set/get below. `want` restricts which category this call
+ // site is allowed to touch -- a visual name reaching uwu.behavior.set (or
+@@ -2171,6 +2245,7 @@ const luaL_Reg kBehaviorFuncs[] = {
+ const luaL_Reg kuwuwmFuncs[] = {
+     {"spawn",             l_spawn            },
+     {"bind",              l_bind             },
++    {"mousebind",         l_mousebind        },
+     {"set",               l_set              },
+     {"get",               l_get              },
+     {"quit",              l_quit             },
+@@ -2572,6 +2647,22 @@ void LuaConfig::invoke(int fn_ref) {
+     }
+ }
+
++void LuaConfig::invokeWithClient(int fn_ref, View* view) {
++    lua_rawgeti(L, LUA_REGISTRYINDEX, fn_ref);
++    pushClient(L, view);
++    guardedCall(1);
++
++    // Same deferred-reload handling as invoke() above -- a mousebind
++    // closure is just as free to call uwu.reload() as a regular keybind
++    // is, and needs the same "wait until the Lua call stack is empty"
++    // treatment.
++    if(reload_pending) {
++        wlr_log(WLR_INFO, "deferred reload requested from mousebind callback");
++        reload_pending = false;
++        server_->reloadConfig();
++    }
++}
++
+ void LuaConfig::fireClientEvent(const std::string& event, View* view) {
+     // Copy the ids of hooks registered for this event *before* invoking
+     // any of them -- a hook is free to call uwu.unhook() on itself or on
+@@ -2649,6 +2740,7 @@ bool LuaConfig::reload() {
+     // include losing the very reload keybind you just used to get here.
+     lua_State*                          old_L        = L;
+     std::multimap<uint32_t, LuaKeybind> old_keybinds = std::move(keybinds);
++    std::vector<LuaMousebind>           old_mousebinds = std::move(mousebinds);
+     std::vector<MonitorRule>            old_rules    = std::move(monitor_rules);
+     std::vector<InputRule>     old_input_rules       = std::move(input_rules);
+     std::vector<WallpaperRule> old_wallpaper_rules = std::move(wallpaper_rules);
+@@ -2657,6 +2749,7 @@ bool LuaConfig::reload() {
+     int                        old_next_hook_id    = next_hook_id;
+
+     keybinds.clear();
++    mousebinds.clear();
+     monitor_rules.clear();
+     input_rules.clear();
+     wallpaper_rules.clear();
+@@ -2671,9 +2764,11 @@ bool LuaConfig::reload() {
+     if(ok) {
+         if(old_L) { lua_close(old_L); }
+         wlr_log(WLR_INFO,
+-                "rc.lua reload ok: %zu keybind(s), %zu monitor rule(s), "
++                "rc.lua reload ok: %zu keybind(s), %zu mousebind(s), "
++                "%zu monitor rule(s), "
+                 "%zu input rule(s), %zu wallpaper rule(s), %zu hook(s)",
+                 keybinds.size(),
++                mousebinds.size(),
+                 monitor_rules.size(),
+                 input_rules.size(),
+                 wallpaper_rules.size(),
+@@ -2682,6 +2777,7 @@ bool LuaConfig::reload() {
+         if(L) { lua_close(L); }
+         L               = old_L;
+         keybinds        = std::move(old_keybinds);
++        mousebinds      = std::move(old_mousebinds);
+         monitor_rules   = std::move(old_rules);
+         input_rules     = std::move(old_input_rules);
+         wallpaper_rules = std::move(old_wallpaper_rules);
+diff --git a/src/lua_config.hpp b/src/lua_config.hpp
+index d54d67d..912b0eb 100644
+--- a/src/lua_config.hpp
++++ b/src/lua_config.hpp
+@@ -209,6 +209,20 @@ struct LuaKeybind {
+                       // lifetime of the owning LuaConfig's lua_State.
+ };
+
++// uwu.mousebind(mods, button, fn) -- same idea as LuaKeybind above, but for
++// a modifier+pointer-button combo instead of a modifier+key one. This is
++// what floating-window drag-move/drag-resize is built on (sway/i3's
++// floating_modifier equivalent): rc.lua binds e.g. {"mod"}+left to a
++// closure that calls client:begin_move(), and {"mod"}+right to one that
++// calls client:begin_resize(). Dispatched from the cursor-button handler
++// in input.cpp against whichever view is under the cursor at press time,
++// the same way LuaKeybind is dispatched against whichever keysym came in.
++struct LuaMousebind {
++    uint32_t mods;
++    uint32_t button;  // linux/input-event-codes.h BTN_* value
++    int      fn_ref;
++};
++
+ // One uwu.hook(event, fn) registration. `id` is what uwu.unhook() takes;
+ // handed out sequentially by LuaConfig::next_hook_id rather than reusing
+ // the registry ref itself, so a hook can be unregistered from *inside*
+@@ -253,6 +267,14 @@ public:
+     // the whole compositor down.
+     void invoke(int fn_ref);
+
++    // Same as invoke(), but calls fn_ref with a single argument: a fresh
++    // Client userdata wrapping `view` (see checkClient()/pushClient() in
++    // lua_config.cpp). Used for uwu.mousebind() closures, which -- unlike
++    // plain keybinds -- are dispatched against whatever view happened to
++    // be under the cursor at press time, so the closure needs a handle to
++    // it (typically to call client:begin_move()/:begin_resize()).
++    void invokeWithClient(int fn_ref, View* view);
++
+     // Fully reloads rc.lua from scratch: clears keybinds/monitor_rules,
+     // resets settings back to RuntimeConfig{} defaults, closes the
+     // current Lua VM, and re-runs init()+load() on a brand new one --
+@@ -308,6 +330,7 @@ public:
+
+     RuntimeConfig                       settings;
+     std::multimap<uint32_t, LuaKeybind> keybinds;
++    std::vector<LuaMousebind>           mousebinds;
+
+     // Registered by uwu.hook(), consumed by fire*Event above. Cleared and
+     // repopulated on every reload() exactly like keybinds/monitor_rules --
+diff --git a/src/server.hpp b/src/server.hpp
+index eed9706..60f9e54 100644
+--- a/src/server.hpp
++++ b/src/server.hpp
+@@ -304,6 +304,20 @@ public:
+     wlr_box    grab_geobox{};
+     uint32_t   resize_edges = 0;
+
++    // Set true for the duration of a uwu.mousebind()-initiated grab (see
++    // input.cpp's cursor_button handler), false for a client-initiated one
++    // (xdg_toplevel/xwayland request_move/request_resize, entered via
++    // View::beginInteractiveMove/beginInteractiveResize directly). Both
++    // land in the same cursor_mode != Passthrough state, but only the
++    // mousebind path also skipped forwarding the *press* to the client --
++    // a client-initiated grab's press already went through the ordinary
++    // wlr_seat_pointer_notify_button call before the grab even started.
++    // The button-release handler consults this to decide whether the
++    // matching release should be forwarded too (client-initiated: yes, to
++    // balance the press it already saw; mousebind-initiated: no, same as
++    // the press it never saw).
++    bool mousebind_grab_active = false;
++
+     void    focusView(View* view);
+     void    closeOnTag(uint32_t tagmask);
+     Output* outputAt(double lx, double ly);
+diff --git a/src/view.cpp b/src/view.cpp
+index fc066fc..9855585 100644
+--- a/src/view.cpp
++++ b/src/view.cpp
+@@ -7,6 +7,7 @@ extern "C" {
+ #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
+ #include <wlr/types/wlr_scene.h>
+ #include <wlr/types/wlr_seat.h>
++#include <wlr/util/edges.h>
+ }
+
+ #include "idle.hpp"
+@@ -40,8 +41,9 @@ View::~View() {
+
+     if(server.focused_view == this) { server.focused_view = nullptr; }
+     if(server.grabbed_view == this) {
+-        server.grabbed_view = nullptr;
+-        server.cursor_mode  = CursorMode::Passthrough;
++        server.grabbed_view          = nullptr;
++        server.cursor_mode           = CursorMode::Passthrough;
++        server.mousebind_grab_active = false;
+     }
+     // Recursive: tears down border_tree/border_rects and whatever of
+     // content_tree is still alive (for XdgToplevel, the client's own
+@@ -479,6 +481,16 @@ void View::beginInteractiveResize(uint32_t edges) {
+     server.grab_geobox  = geo;
+ }
+
++void View::beginInteractiveResizeFromCursor() {
++    if(!is_floating || is_fullscreen) { return; }
++    double mid_x = geo.x + geo.width / 2.0;
++    double mid_y = geo.y + geo.height / 2.0;
++    uint32_t edges =
++        (server.cursor->x < mid_x ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT) |
++        (server.cursor->y < mid_y ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM);
++    beginInteractiveResize(edges);
++}
++
+ void View::setOpacity(float alpha) {
+     setOpacity(alpha, server.focused_view == this);
+ }
+diff --git a/src/view.hpp b/src/view.hpp
+index ba23678..8802ab8 100644
+--- a/src/view.hpp
++++ b/src/view.hpp
+@@ -275,6 +275,17 @@ struct View {
+     // includes view.hpp, and view.hpp only forward-declares it.
+     void applyOpacityOverride();
+
++    // Thin public wrappers around the protected beginInteractiveMove()/
++    // beginInteractiveResizeFromCursor() below, for the exact same reason
++    // applyOpacityOverride() above is a wrapper around protected
++    // setOpacity(): uwu.mousebind() closures call client:begin_move()/
++    // :begin_resize() (l_client_begin_move/l_client_begin_resize in
++    // lua_config.cpp), which are free C functions, not View members, and
++    // so can't reach the protected methods directly the way
++    // XdgToplevel::handleRequestMove/XWaylandView::handleRequestMove can.
++    void beginMoveFromMousebind() { beginInteractiveMove(); }
++    void beginResizeFromMousebind() { beginInteractiveResizeFromCursor(); }
++
+ protected:
+     // Shared implementations for the request_move/request_resize handlers
+     // every backend has (xdg_toplevel and xwayland both expose them) --
+@@ -282,6 +293,19 @@ protected:
+     void beginInteractiveMove();
+     void beginInteractiveResize(uint32_t edges);
+
++    // Same as beginInteractiveResize(edges), but picks `edges` itself from
++    // which quadrant of the window the cursor is currently over (left half
++    // drags the left edge, top half drags the top edge, etc) instead of
++    // requiring the caller to know which edge it wants up front -- the
++    // same "resize from the nearest edge/corner" convention i3/sway's
++    // floating_modifier resize-drag uses. Meant for uwu.mousebind()
++    // closures (client:begin_resize(), via beginResizeFromMousebind()
++    // above) where the bind fires from wherever the cursor happened to
++    // be, not from a specific titlebar corner the way
++    // XdgToplevel::handleRequestResize's edges (driven by the client's
++    // own CSD hit-test) are.
++    void beginInteractiveResizeFromCursor();
++
+     // Starts the "grow-in" open animation (fade 0->1, slight upward
+     // slide-in) from the view's current `geo`. Call once, right after the
+     // subclass has placed the view at its real final geo (see

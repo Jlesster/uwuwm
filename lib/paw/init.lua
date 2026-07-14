@@ -298,6 +298,32 @@ paw.client = {
     end
     c:resize(c.geo.width + dw, c.geo.height + dh)
   end,
+
+  -- paw.client.begin_move()/begin_resize() -- keyboard-armed version of
+  -- the c:begin_move()/c:begin_resize() grabs uwu.mousebind() closures
+  -- normally call: a keybind (e.g. mod+z/mod+x) arms the grab on the
+  -- *focused* client instead of whatever's under the cursor at press
+  -- time, then ordinary mouse motion drives it exactly like a
+  -- mousebind-started drag would -- the grab doesn't care how it got
+  -- armed, only that cursor_mode is now Move/Resize (see
+  -- processCursorMotion in input.cpp). Ends the same way too: click any
+  -- button to drop it. No-op (not an error) with no focused client, same
+  -- reasoning move()/resize() above give; begin_move()/begin_resize()
+  -- themselves are already silent no-ops on a tiled/fullscreen client.
+  begin_move = function()
+    local c = uwu.client.focused()
+    if not c then
+      return
+    end
+    c:begin_move()
+  end,
+  begin_resize = function()
+    local c = uwu.client.focused()
+    if not c then
+      return
+    end
+    c:begin_resize()
+  end,
 }
 
 -- ── keybinds ─────────────────────────────────────────────────────────────
@@ -768,7 +794,9 @@ end
 -- no-op, since there's nothing to reveal and nothing to launch.
 ---@param name string
 function paw.specialworkspace.toggle(name)
-  if not sw_hooks_registered then sw_register_hooks() end
+  if not sw_hooks_registered then
+    sw_register_hooks()
+  end
   local def = sw_defs[name]
   if not def then
     error(
@@ -801,7 +829,9 @@ end
 -- hide an already-visible one).
 ---@param name string
 function paw.specialworkspace.show(name)
-  if not sw_hooks_registered then sw_register_hooks() end
+  if not sw_hooks_registered then
+    sw_register_hooks()
+  end
   local def = sw_defs[name]
   if not def then
     error(
@@ -821,7 +851,9 @@ end
 
 ---@param name string
 function paw.specialworkspace.hide(name)
-  if not sw_hooks_registered then sw_register_hooks() end
+  if not sw_hooks_registered then
+    sw_register_hooks()
+  end
   local c = sw_find(name)
   if c then
     c.minimized = true
