@@ -302,4 +302,394 @@ function paw.on(event, fn)
 end
 paw.off = uwu.unhook
 
+-- ── workspaces ───────────────────────────────────────────────────────────
+-- paw.workspace -- a friendlier name for what the C side calls a "tag"
+-- (see output.hpp's comment on Output::tagset: one flat, 9-bit set of
+-- tags shared across every output -- Awesome/dwm-style, not a separate
+-- per-monitor workspace list). paw.tags(fn) above already loops
+-- 1..uwu.tag_count for building keybind blocks; paw.workspace wraps the
+-- actual uwu.tag.* actions the same way paw.layout wraps uwu.layout.*,
+-- plus optional human names for anyone who'd rather bind mod+w than
+-- remember "tag 4 is always chat".
+paw.workspace = {
+  -- paw.workspace.go(n) / .toggle(n) / .move_focused_to(n) -- 1-based,
+  -- straight passthroughs to uwu.tag.view/toggle/move_client_here. `n`
+  -- may also be a name previously registered via paw.workspace.names().
+  go = function(n)
+    return uwu.tag.view(paw.workspace.resolve(n))
+  end,
+  toggle = function(n)
+    return uwu.tag.toggle(paw.workspace.resolve(n))
+  end,
+  move_focused_to = function(n)
+    return uwu.tag.move_client_here(paw.workspace.resolve(n))
+  end,
+  close_all = function(n)
+    return uwu.tag.close_all(paw.workspace.resolve(n))
+  end,
+
+  -- paw.workspace.current([output_name]) -> raw tagset bitmask (see
+  -- uwu.tag.current -- the read-side counterpart to view/toggle, which
+  -- only ever wrote a tagset before now). Defaults to the focused
+  -- output when `output_name` is omitted.
+  current = function(output_name)
+    return uwu.tag.current(output_name)
+  end,
+
+  -- paw.workspace.current_indices([output_name]) -> array of 1-based
+  -- tag numbers currently visible, decoded from current()'s bitmask.
+  -- Most setups only ever show one at a time, but uwu.tag.toggle can
+  -- put an output on several simultaneously, so this is a list rather
+  -- than a single number.
+  current_indices = function(output_name)
+    local mask = uwu.tag.current(output_name)
+    local out = {}
+    if not mask then
+      return out
+    end
+    for i = 1, uwu.tag_count do
+      if (mask & (1 << (i - 1))) ~= 0 then
+        table.insert(out, i)
+      end
+    end
+    return out
+  end,
+
+  -- paw.workspace.each(fn) -- alias of paw.tags(fn); kept as its own
+  -- name under paw.workspace so everything workspace-shaped lives under
+  -- one table instead of half living on bare paw.
+  each = paw.tags,
+
+  -- paw.workspace.on_change(fn) -- alias of paw.on("tags_changed", fn):
+  -- fn receives (monitor_name, new_tagset) whenever any output's
+  -- visible tagset changes, from any source (a keybind, a rule's
+  -- apply.tag, monitor unplug migration -- see setTagset's own comment
+  -- in output.cpp for why every path funnels through one place).
+  on_change = function(fn)
+    return paw.on('tags_changed', fn)
+  end,
+}
+
+-- paw.workspace.names({ [1] = "web", [2] = "code", [3] = "chat" }) --
+-- optional; lets go/toggle/move_focused_to/close_all above take a name
+-- instead of remembering raw tag numbers. Purely a Lua-side lookup
+-- table -- the C side and uwu.tag.* never see anything but the
+-- resolved 1-based integer, so this is safe to skip entirely if you're
+-- happy with bare numbers (paw.workspace.resolve(n) is a no-op for
+-- anything that's already a number).
+local workspace_names = {}
+
+function paw.workspace.names(map)
+  for name, n in pairs(map or {}) do
+    workspace_names[name] = n
+  end
+end
+
+function paw.workspace.resolve(n)
+  if type(n) == 'number' then
+    return n
+  end
+  local resolved = workspace_names[n]
+  if not resolved then
+    error("paw.workspace: no such workspace name '" .. tostring(n) .. "'")
+  end
+  return resolved
+end
+
+-- ── special workspaces (scratchpads) ────────────────────────────────────
+-- paw.specialworkspace -- Hyprland-style named scratchpads. There's no
+-- spare "special" tag at the C level to dedicate to this (all 9 tag
+-- bits are ordinary, user-visible tags -- see the paw.workspace comment
+-- above), so a special workspace is built entirely out of primitives
+-- that already exist for other reasons:
+--
+--   * client.minimized (View::setMinimized, view.cpp) -- scene-disables
+--     the client and drops it out of tiling/focus order while hidden,
+--     without touching its output/tags/geo, so hiding and re-showing a
+--     scratchpad is cheap and keeps whatever state it had.
+--   * client.floating -- a scratchpad is always a floating overlay, never
+--     tiled into the layout.
+--   * client:set_tags_mask(mask) + uwu.tag.current() -- every time a
+--     scratchpad is *shown*, it's re-tagged onto the exact live tagset of
+--     the focused output first. That's what makes it follow you: toggle
+--     it on from tag 2, it's on tag 2; switch to tag 5 and toggle it on
+--     again, it's now on tag 5 too -- always an overlay on whatever
+--     you're actually looking at, never a fixed "home" tag you have to
+--     go find it on.
+--
+-- Usage:
+--   paw.specialworkspace.set("term", {
+--     spawn = "wezterm start --class scratch_term",
+--     match = { app_id = "scratch_term" },
+--     size  = { width = 0.6, height = 0.5 }, -- fraction of output size
+--   })
+--   uwu.bind({"mod"}, "grave", function()
+--     paw.specialworkspace.toggle("term")
+--   end)
+--
+-- `spawn`/`match` are optional -- paw.specialworkspace.move_focused(name)
+-- claims whatever client is currently focused into a named scratchpad
+-- with no pre-registered command at all, for one-off ad hoc use.
+paw.specialworkspace = {}
+
+-- name -> { spawn, match, size, clients = {[id]=true}, spawning }
+local sw_defs = {}
+-- client id -> name, so hooks/cleanup don't have to scan every def
+local sw_owner = {}
+-- Set to true once the client::manage / client::unmanage hooks below
+-- have been registered. Lazy on purpose, and registered from the
+-- *runtime* entry points (.toggle, .show, .hide) rather than from
+-- .set(), so the hooks sit at the *end* of the registration list --
+-- any paw.rule({ when = { floating = true }, ... }) the user has
+-- registered in rc.lua fires first, sees the freshly-mapped client
+-- as not-yet-floating, and (correctly) doesn't match. Without this
+-- ordering, a catch-all "park every floater on the scratch tag" rule
+-- re-tags the scratchpad the moment sw_reveal marks it floating, so
+-- the scratchpad ends up on tag 9 instead of overlaying the focused
+-- tag. .set() is data registration (called at file-load time, often
+-- alongside .rule() calls); .toggle/.show/.hide are the runtime calls
+-- that fire on keybind presses, which by definition happen after
+-- rc.lua has fully loaded -- so the hooks naturally end up last in
+-- the registration list regardless of where .set() sits in the file.
+local sw_hooks_registered = false
+-- Forward-declared here so the runtime entry points defined just below
+-- (toggle, show, hide) can call into the function whose body sits
+-- further down the file. Without the forward declaration, their
+-- bodies resolve sw_register_hooks as a free variable (nil) at call
+-- time, since the local doesn't exist in their lexical scope.
+local sw_register_hooks
+
+local function sw_def(name)
+  sw_defs[name] = sw_defs[name] or { clients = {} }
+  return sw_defs[name]
+end
+
+-- paw.specialworkspace.set(name, { spawn, match, size }) -- registers or
+-- updates a scratchpad definition. Calling it again with a running
+-- instance already claimed doesn't disturb that instance; it only
+-- changes what a *future* spawn/match/reveal uses.
+--
+-- Pure data registration -- does NOT install the manage/unmanage hooks
+-- (those are installed lazily on the first runtime call to .toggle,
+-- .show, or .hide, so they sit at the end of the registration list
+-- and run *after* any paw.rule() the user has already registered --
+-- see the long comment above sw_hooks_registered for the reasoning).
+function paw.specialworkspace.set(name, opts)
+  opts = opts or {}
+  local def = sw_def(name)
+  def.spawn = opts.spawn
+  def.match = opts.match
+  def.size = opts.size
+end
+
+local function sw_matches(c, match)
+  if not match then
+    return false
+  end
+  if match.app_id and c.app_id ~= match.app_id then
+    return false
+  end
+  if match.title and not string.find(c.title, match.title) then
+    return false
+  end
+  return true
+end
+
+-- Finds the live Client belonging to `name`, if its window is still
+-- open. def.clients may still list ids for windows that have since
+-- closed (cleaned up lazily by the closes-hook below, not synchronously
+-- here) -- iterating uwu.client.list() rather than trusting the id
+-- table directly means a stale id just silently matches nothing instead
+-- of needing its own liveness check.
+local function sw_find(name)
+  local def = sw_defs[name]
+  if not def then
+    return nil
+  end
+  for _, c in ipairs(uwu.client.list()) do
+    if def.clients[c.id] then
+      return c
+    end
+  end
+  return nil
+end
+
+local function sw_focused_monitor()
+  local out = nil
+  paw.monitor.each(function(m)
+    if m.focused then
+      out = m
+    end
+  end)
+  return out
+end
+
+-- Claims `c` into scratchpad `name` and makes it visible: floats it,
+-- applies def.size (if any) relative to the focused output, re-tags it
+-- onto that output's exact live tagset, un-minimizes, and focuses it.
+-- This is the one place that actually shows a scratchpad -- toggle/show
+-- below both funnel through here.
+local function sw_reveal(c, name)
+  local def = sw_def(name)
+  sw_owner[c.id] = name
+  def.clients[c.id] = true
+
+  if not c.floating then
+    c.floating = true
+  end
+
+  if def.size then
+    local out = sw_focused_monitor()
+    if out then
+      local w = math.floor(out.width * (def.size.width or 0.5))
+      local h = math.floor(out.height * (def.size.height or 0.5))
+      c:resize(w, h)
+      c:move(
+        out.x + math.floor((out.width - w) / 2),
+        out.y + math.floor((out.height - h) / 2)
+      )
+    end
+  end
+
+  local mask = uwu.tag.current()
+  if mask then
+    c:set_tags_mask(mask)
+  end
+
+  c.minimized = false
+  c:focus()
+end
+
+-- Catches every newly-mapped client, not just scratchpad ones -- most
+-- fall through both checks below and cost one pairs() scan over
+-- sw_defs, which stays tiny (a handful of named scratchpads at most).
+-- Two cases:
+--   1. def.spawning is true -- paw.specialworkspace.toggle() just ran
+--      uwu.spawn(def.spawn) and is waiting for the resulting window to
+--      map. Claim it and reveal it immediately.
+--   2. Not spawning, but it matches def.match anyway (e.g. the app was
+--      already running and just opened a second window, or it was
+--      launched some other way entirely). Claim it but leave it hidden
+--      -- an unprompted new scratchpad window popping up unminimized
+--      would be surprising; the next explicit toggle()/show() reveals
+--      it same as any other claimed instance.
+--
+-- Registered lazily from paw.specialworkspace.set() rather than at
+-- module top so the hook sits at the *end* of the registration list
+-- and runs after any paw.rule({ when = { floating = true }, ... }) the
+-- user has registered -- see that function's comment for the reasoning.
+sw_register_hooks = function()
+  sw_hooks_registered = true
+
+  uwu.hook('client::manage', function(c)
+    for name, def in pairs(sw_defs) do
+      if not sw_owner[c.id] and def.match and sw_matches(c, def.match) then
+        sw_owner[c.id] = name
+        def.clients[c.id] = true
+        if def.spawning then
+          def.spawning = false
+          sw_reveal(c, name)
+        else
+          c.floating = true
+          c.minimized = true
+        end
+        break
+      end
+    end
+  end)
+
+  -- Lazily forgets a closed client's id instead of leaving it in
+  -- def.clients forever -- harmless correctness-wise (sw_find only ever
+  -- matches against currently-open clients), but this keeps the table
+  -- from growing without bound across a long uptime with lots of
+  -- ephemeral scratchpad instances (e.g. a scratchpad terminal that gets
+  -- closed and respawned many times in a session).
+  uwu.hook('client::unmanage', function(c)
+    local name = sw_owner[c.id]
+    if name and sw_defs[name] then
+      sw_defs[name].clients[c.id] = nil
+    end
+    sw_owner[c.id] = nil
+  end)
+end
+
+-- paw.specialworkspace.toggle(name) -- the main entry point. No running
+-- instance and no def.spawn -- errors if `name` was never registered
+-- via .set() (a typo'd name should fail loudly, same reasoning as
+-- l_client_newindex's rejection of unknown client properties); a
+-- registered-but-spawnless def with no running instance is a silent
+-- no-op, since there's nothing to reveal and nothing to launch.
+function paw.specialworkspace.toggle(name)
+  if not sw_hooks_registered then sw_register_hooks() end
+  local def = sw_defs[name]
+  if not def then
+    error(
+      "paw.specialworkspace: no definition for '"
+        .. tostring(name)
+        .. "' -- call paw.specialworkspace.set() first"
+    )
+  end
+
+  local c = sw_find(name)
+  if c then
+    if c.minimized then
+      sw_reveal(c, name)
+    else
+      c.minimized = true
+    end
+    return
+  end
+
+  if def.spawn then
+    def.spawning = true
+    uwu.spawn(def.spawn)
+  end
+end
+
+-- paw.specialworkspace.show(name) / .hide(name) -- non-toggling
+-- versions, for binds that want "always bring to front" / "always
+-- dismiss" rather than a flip-flop (e.g. a hook that shows a scratchpad
+-- on some external event, where re-triggering it mid-session shouldn't
+-- hide an already-visible one).
+function paw.specialworkspace.show(name)
+  if not sw_hooks_registered then sw_register_hooks() end
+  local def = sw_defs[name]
+  if not def then
+    error(
+      "paw.specialworkspace: no definition for '"
+        .. tostring(name)
+        .. "' -- call paw.specialworkspace.set() first"
+    )
+  end
+  local c = sw_find(name)
+  if c then
+    sw_reveal(c, name)
+  elseif def.spawn then
+    def.spawning = true
+    uwu.spawn(def.spawn)
+  end
+end
+
+function paw.specialworkspace.hide(name)
+  if not sw_hooks_registered then sw_register_hooks() end
+  local c = sw_find(name)
+  if c then
+    c.minimized = true
+  end
+end
+
+-- paw.specialworkspace.move_focused(name) -- ad hoc scratchpad use with
+-- no paw.specialworkspace.set() definition at all: grabs whatever
+-- client is currently focused and claims/reveals it under `name` on the
+-- spot. A later paw.specialworkspace.toggle(name)/hide(name) then works
+-- on it same as a spawn-configured one, just without a `spawn` to fall
+-- back on if it gets closed.
+function paw.specialworkspace.move_focused(name)
+  local c = uwu.client.focused()
+  if not c then
+    return
+  end
+  sw_reveal(c, name)
+end
+
 return paw

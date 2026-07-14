@@ -16,9 +16,11 @@
 --         primitive namespaces paw/nyaa wrap below -- reach for them
 --         directly only when paw/nyaa genuinely don't cover something.
 --   paw   window-management sugar over `uwu` -- keybind lists w/
---         descriptions, client rules, short-named hooks, and (paw.layout/
---         paw.client) the tiling and focus-navigation actions your
---         keybinds actually call
+--         descriptions, client rules, short-named hooks, the tiling and
+--         focus-navigation actions your keybinds actually call
+--         (paw.layout/paw.client), tag actions under a friendlier name
+--         (paw.workspace), and named floating scratchpads
+--         (paw.specialworkspace)
 --   nyaa  aesthetics only -- two-color presets (nyaa.presets) or full
 --         26-role palettes (nyaa.palettes/nyaa.palette(), Catppuccin's
 --         four flavors plus a few others), applied via nyaa.wear() /
@@ -389,6 +391,84 @@ paw.keys(keys)
 -- yourself if you want it, e.g. a dedicated "close everything on tag 9"
 -- bind:
 -- paw.keys({ { { "mod", "shift", "ctrl" }, "9", function() uwu.tag.close_all(9) end } })
+
+-- paw.workspace is the same tag actions above under friendlier names --
+-- paw.workspace.go(n)/.toggle(n)/.move_focused_to(n)/.close_all(n) are
+-- straight passthroughs to uwu.tag.view/toggle/move_client_here/
+-- close_all, kept alongside the raw uwu.tag.* binds above rather than
+-- replacing them (both call the same C side, pick whichever reads
+-- better to you). The one thing paw.workspace adds that raw uwu.tag.*
+-- doesn't have at all is a *read* side -- uwu.tag.current() didn't
+-- exist until now, only ever the write side (view/toggle):
+--
+--   paw.workspace.current_indices() -- e.g. {3} while tag 3 is showing,
+--                                       {2, 5} if tag 5 got toggled on
+--                                       over tag 2 via mod+ctrl+5
+--
+-- Optional name aliases, if you'd rather bind mod+w than remember "tag
+-- 4 is always chat":
+-- paw.workspace.names({ web = 1, code = 2, chat = 4, scratch = 9 })
+-- uwu.bind(mod, "w", function() paw.workspace.go("web") end)
+
+-- ── Special workspaces (scratchpads) ────────────────────────────────────
+-- paw.specialworkspace -- Hyprland-style named scratchpads: a floating
+-- window that toggles in and out of view on top of whatever tag you're
+-- currently on, instead of living on a fixed tag you have to go find it
+-- on. Built on client.minimized (see View::setMinimized in view.cpp) --
+-- toggling one off doesn't kill it, just hides it; toggling back on
+-- restores exactly where it was.
+--
+-- `spawn` is the command to launch if no instance is running yet;
+-- `match` is how paw recognizes the resulting window once it maps
+-- (usually the app's own --class/--app-id flag, so it doesn't
+-- accidentally claim an unrelated window of the same app you already
+-- had open); `size` is fractional (0-1) of the focused output's
+-- dimensions, applied fresh every time it's shown.
+paw.specialworkspace.set('term', {
+  spawn = terminal .. ' start --class scratch_term',
+  match = { app_id = 'scratch_term' },
+  size = { width = 0.6, height = 0.55 },
+})
+
+paw.specialworkspace.set('music', {
+  spawn = 'spotify --class=scratch_music',
+  match = { app_id = 'scratch_music' },
+  size = { width = 0.4, height = 0.6 },
+})
+
+paw.keys({
+  {
+    mod,
+    'grave',
+    function()
+      paw.specialworkspace.toggle('term')
+    end,
+    'toggle scratchpad terminal',
+  },
+  {
+    { 'mod', 'shift' },
+    'grave',
+    function()
+      paw.specialworkspace.toggle('music')
+    end,
+    'toggle scratchpad music player',
+  },
+})
+
+-- No paw.specialworkspace.set() needed at all for ad hoc use -- grab
+-- whatever's focused right now and stash it as a scratchpad on the
+-- spot, no pre-registered spawn command required:
+-- uwu.bind({ "mod", "shift" }, "s", function()
+--   paw.specialworkspace.move_focused("adhoc")
+-- end)
+-- uwu.bind(mod, "s", function() paw.specialworkspace.toggle("adhoc") end)
+
+-- .show(name)/.hide(name) are the non-toggling versions, for a bind (or
+-- a hook) that wants "always bring to front" / "always dismiss" rather
+-- than a flip-flop -- e.g. always surface the scratchpad terminal on
+-- reload instead of leaving it in whatever state a previous session's
+-- toggle left it:
+-- paw.on("monitor_connected", function() paw.specialworkspace.show("term") end)
 
 -- ── Monitor configuration ───────────────────────────────────────────────
 -- Output configuration (position/mode/scale/transform/adaptive-sync) is

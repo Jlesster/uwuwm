@@ -563,6 +563,22 @@ int l_client_toggle_tag(lua_State* L) {
     return 0;
 }
 
+// c:set_tags_mask(mask) -- like set_tag(n), but takes the raw 0-indexed
+// bitmask View::tags/setTags() already use internally (same value
+// `client.tags` already reads back) instead of a single 1-based index.
+// set_tag/toggle_tag cover the common single-active-tag case; this is
+// the escape hatch for anything that needs to land a client on
+// whatever *combination* of tags is currently visible (e.g. a
+// multi-tag view via uwu.tag.toggle, or paw.specialworkspace re-tagging
+// a scratchpad client onto the target output's exact live tagset rather
+// than guessing at a single tag within it).
+int l_client_set_tags_mask(lua_State* L) {
+    View*    view = checkClient(L, 1);
+    uint32_t mask = static_cast<uint32_t>(luaL_checkinteger(L, 2));
+    view->setTags(mask);
+    return 0;
+}
+
 int l_client_move_to_output(lua_State* L) {
     View*       view   = checkClient(L, 1);
     const char* name   = luaL_checkstring(L, 2);
@@ -629,6 +645,7 @@ const luaL_Reg kClientMethods[] = {
     {"kill",           l_client_kill          },
     {"set_tag",        l_client_set_tag       },
     {"toggle_tag",     l_client_toggle_tag    },
+    {"set_tags_mask",  l_client_set_tags_mask },
     {"move_to_output", l_client_move_to_output},
     {"move",           l_client_move          },
     {"resize",         l_client_resize        },
@@ -674,6 +691,10 @@ int l_client_index(lua_State* L) {
     }
     if(k == "fullscreen") {
         lua_pushboolean(L, view->is_fullscreen);
+        return 1;
+    }
+    if(k == "minimized") {
+        lua_pushboolean(L, view->is_minimized);
         return 1;
     }
     if(k == "output") {
@@ -753,6 +774,10 @@ int l_client_newindex(lua_State* L) {
     }
     if(k == "fullscreen") {
         view->setFullscreen(lua_toboolean(L, 3));
+        return 0;
+    }
+    if(k == "minimized") {
+        view->setMinimized(lua_toboolean(L, 3));
         return 0;
     }
     if(k == "opacity") {
@@ -1147,6 +1172,34 @@ int l_close_all_on_tag(lua_State* L) {
     if(n < 0 || n >= cfg::kTagCount) { return 0; }
     getServer(L)->closeOnTag(1u << n);
     return 0;
+}
+
+// uwu.tag.current([output_name]) -> raw tagset bitmask (the same value
+// View::tags/client.tags/set_tags_mask() use) currently visible on
+// `output_name`, or the focused output if omitted. nil if that output
+// doesn't exist (or nothing's focused yet). This is the read side of
+// what setTagset()/l_view_tag write -- exposed on its own because
+// nothing before now needed to *read back* a tagset from Lua, only ever
+// set one.
+int l_tag_current(lua_State* L) {
+    Server*     server = getServer(L);
+    const char* name   = lua_isstring(L, 1) ? lua_tostring(L, 1) : nullptr;
+    Output*     out    = server->focused_output;
+    if(name) {
+        out = nullptr;
+        for(auto& o : server->outputs) {
+            if(name == o->wlr_output->name) {
+                out = o.get();
+                break;
+            }
+        }
+    }
+    if(!out) {
+        lua_pushnil(L);
+    } else {
+        lua_pushinteger(L, out->tagset);
+    }
+    return 1;
 }
 
 int l_focus_monitor(lua_State* L) {
@@ -1689,6 +1742,8 @@ int l_monitor_list(lua_State* L) {
         }
         lua_pushboolean(L, server->focused_output == out.get());
         lua_setfield(L, -2, "focused");
+        lua_pushinteger(L, out->tagset);
+        lua_setfield(L, -2, "tagset");
         lua_rawseti(L, -2, i++);
     }
     return 1;
@@ -2082,6 +2137,7 @@ const luaL_Reg kTagFuncs[] = {
     {"toggle",           l_toggle_tag      },
     {"move_client_here", l_move_to_tag     },
     {"close_all",        l_close_all_on_tag},
+    {"current",          l_tag_current     },
     {nullptr,            nullptr           },
 };
 
