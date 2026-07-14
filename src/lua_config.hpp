@@ -6,14 +6,19 @@ struct lua_State;
 
 #include "wallpaper.hpp"
 
+#include <wayland-server-core.h>
+
 #include <cstdint>
 #include <map>
+#include <memory>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 class Server;
 struct View;
 struct Output;
+class LuaConfig;
 
 // Runtime-tunable settings that used to be compile-time constants in
 // config.hpp. Defaults below match the old cfg:: values exactly; rc.lua
@@ -236,6 +241,35 @@ struct LuaHook {
     int         fn_ref;
 };
 
+// uwu.timer.set_interval(seconds, fn)/set_timeout(seconds, fn) -- the
+// clock-tick primitive a bar widget needs (see bar.hpp) that nothing in
+// uwuwm had before it. `source` is the real wl_event_source driving this;
+// owning it in a unique_ptr-held struct (not a bare int id like LuaHook)
+// is what lets ~LuaTimer clean it up via wl_event_source_remove just by
+// going out of scope -- LuaConfig::timers below is keyed the same way
+// hooks/hooks_id are, but holds unique_ptr<LuaTimer> instead of LuaTimer
+// by value for exactly that reason.
+struct LuaTimer {
+    LuaConfig*       config = nullptr;
+    wl_event_source* source = nullptr;
+    // -2 is LUA_NOREF -- spelled out rather than pulling in <lua.h> for
+    // one constant, matching this header's existing forward-declare-only
+    // treatment of lua_State above.
+    int fn_ref = -2;
+    // Re-arm value in milliseconds; 0 means one-shot (set_timeout): the
+    // callback removes this timer from LuaConfig::timers right after
+    // firing once, instead of calling wl_event_source_timer_update
+    // again. The *first* delay (same as interval_ms for set_interval,
+    // independently given for set_timeout) is passed straight to
+    // addTimer(), not stored here -- see its doc comment.
+    int interval_ms = 0;
+    int id          = 0;
+
+    ~LuaTimer() {
+        if(source) { wl_event_source_remove(source); }
+    }
+};
+
 // Owns the Lua VM and exposes the `uwuwm` API table rc.lua programs
 // against. This is uwuwm's equivalent of AwesomeWM's rc.lua runtime: one
 // global table, plain functions and closures, loaded once at startup from
@@ -338,6 +372,29 @@ public:
     // any more than a deleted keybind does.
     std::vector<LuaHook> hooks;
     int                  next_hook_id = 1;
+
+    // uwu.timer.set_interval/set_timeout register here; l_timer_cancel
+    // and reload() both remove through cancelTimer()/direct erase --
+    // see LuaTimer's own comment for why this is unique_ptr-keyed rather
+    // than a flat vector like hooks.
+    std::unordered_map<int, std::unique_ptr<LuaTimer>> timers;
+    int                                                next_timer_id = 1;
+
+    // Registers a timer that calls fn_ref (already luaL_ref'd by the
+    // caller -- l_timer_set_interval/set_timeout in lua_config.cpp) first
+    // after delay_ms, then (if interval_ms > 0) every interval_ms after
+    // that indefinitely; interval_ms == 0 means fire once, at delay_ms,
+    // then self-remove. set_interval passes the same value for both;
+    // set_timeout passes interval_ms = 0. Returns the id
+    // uwu.timer.cancel() takes.
+    int addTimer(int fn_ref, int delay_ms, int interval_ms);
+
+    // uwu.timer.cancel(id) -- luaL_unref's fn_ref (the timer is being
+    // individually removed while L stays alive, unlike a reload where
+    // the whole L closing makes that unnecessary -- see removeHook's
+    // identical situation) and erases the entry, whose destructor tears
+    // down the wl_event_source.
+    void cancelTimer(int id);
 
     // Populated by uwu.monitor.set() calls in rc.lua (and by any later
     // runtime uwu.monitor.set() calls from keybinds/scripts). Consulted by

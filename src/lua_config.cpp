@@ -1496,6 +1496,61 @@ int l_unhook(lua_State* L) {
     return 0;
 }
 
+// ----------------------------------------------------------------------------
+// uwu.timer.set_interval / set_timeout / cancel
+// ----------------------------------------------------------------------------
+
+// uwu.timer.set_interval(seconds, fn) -> id. Calls fn every `seconds`
+// (fractional allowed -- 0.5 is a valid half-second tick), starting
+// `seconds` after this call, until uwu.timer.cancel(id) or a reload.
+// Nothing in uwuwm had a clock-tick primitive before this -- a bar
+// widget (see bar.hpp) redrawing a clock, or anything else that wants
+// "run this periodically" instead of only ever reacting to a hook, needs
+// it. fn receives no arguments, invoked through the same guardedCall
+// timeout/recursion-guard path every keybind/hook already runs under.
+int l_timer_set_interval(lua_State* L) {
+    double seconds = luaL_checknumber(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    lua_pushvalue(L, 2);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    int ms  = static_cast<int>(seconds * 1000.0);
+    int id  = getConfig(L)->addTimer(ref, ms, ms);
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+// uwu.timer.set_timeout(seconds, fn) -> id. Calls fn exactly once,
+// `seconds` from now, then automatically removes itself -- the id is
+// still valid to pass to uwu.timer.cancel() beforehand, to call it off
+// before it ever fires.
+int l_timer_set_timeout(lua_State* L) {
+    double seconds = luaL_checknumber(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    lua_pushvalue(L, 2);
+    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    int ms  = static_cast<int>(seconds * 1000.0);
+    int id  = getConfig(L)->addTimer(ref, ms, 0);
+    lua_pushinteger(L, id);
+    return 1;
+}
+
+// uwu.timer.cancel(id) -- stops a set_interval before its next tick, or
+// a set_timeout before it ever fires. A no-op (not an error) on an
+// already-fired one-shot or an already-cancelled id, same "unknown id is
+// harmless" convention uwu.unhook() follows.
+int l_timer_cancel(lua_State* L) {
+    int id = static_cast<int>(luaL_checkinteger(L, 1));
+    getConfig(L)->cancelTimer(id);
+    return 0;
+}
+
+const luaL_Reg kTimerFuncs[] = {
+    {"set_interval", l_timer_set_interval},
+    {"set_timeout",  l_timer_set_timeout },
+    {"cancel",       l_timer_cancel      },
+    {nullptr,        nullptr             },
+};
+
 // The actual client::manage hook every uwu.rule() call registers. A
 // plain lua_CFunction can't capture C++ state, so the match/apply spec
 // is baked in as Lua-registry-safe *upvalues* instead (1: match app_id
@@ -2500,6 +2555,10 @@ void LuaConfig::init(Server& server) {
     lua_setfield(L, -2, "wallpaper");
 
     lua_newtable(L);
+    luaL_setfuncs(L, kTimerFuncs, 0);
+    lua_setfield(L, -2, "timer");
+
+    lua_newtable(L);
     luaL_setfuncs(L, kTagFuncs, 0);
     lua_setfield(L, -2, "tag");
 
@@ -2723,6 +2782,69 @@ int LuaConfig::addHook(const std::string& event, int fn_ref) {
     return id;
 }
 
+namespace {
+// The wl_event_source callback every LuaTimer's `source` invokes.
+// `data` is the LuaTimer* itself (see addTimer below) -- everything this
+// needs out of it is copied into locals before calling invoke(), because
+// invoke() running arbitrary Lua can itself call uwu.timer.cancel() on
+// *this exact timer* (or trigger a reload), either of which erases the
+// LuaTimer this callback's `data` pointer was into. Nothing below the
+// invoke() call may dereference `timer` again for that reason -- the
+// one-shot branch only erases by id, never through the (possibly
+// already-dangling) pointer.
+int timerTrampoline(void* data) {
+    auto*      timer       = static_cast<LuaTimer*>(data);
+    LuaConfig* config      = timer->config;
+    int        fn_ref      = timer->fn_ref;
+    int        interval_ms = timer->interval_ms;
+    int        id          = timer->id;
+
+    config->invoke(fn_ref);
+
+    // A reload (or uwu.timer.cancel(id) called on itself, from fn_ref)
+    // may have already destroyed this timer from inside invoke() above
+    // -- re-look-up by id rather than trusting `timer` still points at
+    // live memory before touching it again.
+    auto it = config->timers.find(id);
+    if(it == config->timers.end()) { return 0; }
+
+    if(interval_ms > 0) {
+        wl_event_source_timer_update(it->second->source, interval_ms);
+    } else {
+        // One-shot -- drop the registry ref the way cancelTimer does,
+        // before the unique_ptr destruction releases the event source.
+        // Without this, every fired set_timeout leaks one ref slot in
+        // the Lua registry for the lifetime of the current `L`.
+        luaL_unref(config->L, LUA_REGISTRYINDEX, it->second->fn_ref);
+        config->timers.erase(it);
+    }
+    return 0;
+}
+}  // namespace
+
+int LuaConfig::addTimer(int fn_ref, int delay_ms, int interval_ms) {
+    auto timer         = std::make_unique<LuaTimer>();
+    timer->config      = this;
+    timer->fn_ref      = fn_ref;
+    timer->interval_ms = interval_ms;
+    timer->id          = next_timer_id++;
+    int id             = timer->id;
+
+    wl_event_loop* loop = wl_display_get_event_loop(server_->display);
+    timer->source = wl_event_loop_add_timer(loop, timerTrampoline, timer.get());
+    wl_event_source_timer_update(timer->source, std::max(delay_ms, 1));
+
+    timers.emplace(id, std::move(timer));
+    return id;
+}
+
+void LuaConfig::cancelTimer(int id) {
+    auto it = timers.find(id);
+    if(it == timers.end()) { return; }
+    luaL_unref(L, LUA_REGISTRYINDEX, it->second->fn_ref);
+    timers.erase(it);
+}
+
 void LuaConfig::removeHook(int id) {
     auto it = std::find_if(hooks.begin(), hooks.end(), [id](const LuaHook& h) {
         return h.id == id;
@@ -2745,8 +2867,11 @@ bool LuaConfig::reload() {
     std::vector<InputRule>     old_input_rules     = std::move(input_rules);
     std::vector<WallpaperRule> old_wallpaper_rules = std::move(wallpaper_rules);
     std::vector<LuaHook>       old_hooks           = std::move(hooks);
-    RuntimeConfig              old_settings        = settings;
-    int                        old_next_hook_id    = next_hook_id;
+    std::unordered_map<int, std::unique_ptr<LuaTimer>> old_timers =
+        std::move(timers);
+    RuntimeConfig old_settings         = settings;
+    int           old_next_hook_id     = next_hook_id;
+    int           old_next_timer_id    = next_timer_id;
 
     keybinds.clear();
     mousebinds.clear();
@@ -2754,25 +2879,34 @@ bool LuaConfig::reload() {
     input_rules.clear();
     wallpaper_rules.clear();
     hooks.clear();
-    next_hook_id = 1;
-    settings     = RuntimeConfig{};
-    L            = nullptr;
+    timers.clear();
+    next_hook_id  = 1;
+    next_timer_id = 1;
+    settings      = RuntimeConfig{};
+    L             = nullptr;
 
     init(*server_);
     bool ok = load();
 
     if(ok) {
         if(old_L) { lua_close(old_L); }
+        // old_timers' unique_ptrs go out of scope right here, each
+        // ~LuaTimer tearing down its wl_event_source -- their fn_refs
+        // pointed into old_L, already closed above, so there's nothing
+        // left to individually luaL_unref (same reasoning as hooks: a
+        // whole-state lua_close() invalidates every ref in it without
+        // needing per-ref cleanup first).
         wlr_log(WLR_INFO,
                 "rc.lua reload ok: %zu keybind(s), %zu mousebind(s), "
-                "%zu monitor rule(s), "
-                "%zu input rule(s), %zu wallpaper rule(s), %zu hook(s)",
+                "%zu monitor rule(s), %zu input rule(s), %zu wallpaper "
+                "rule(s), %zu hook(s), %zu timer(s)",
                 keybinds.size(),
                 mousebinds.size(),
                 monitor_rules.size(),
                 input_rules.size(),
                 wallpaper_rules.size(),
-                hooks.size());
+                hooks.size(),
+                timers.size());
     } else {
         if(L) { lua_close(L); }
         L               = old_L;
@@ -2782,7 +2916,15 @@ bool LuaConfig::reload() {
         input_rules     = std::move(old_input_rules);
         wallpaper_rules = std::move(old_wallpaper_rules);
         hooks           = std::move(old_hooks);
+        // Same treatment as the success branch, just the other way
+        // around -- `timers` (populated during the *failed* load, before
+        // it errored out) gets torn down here instead, and old_timers
+        // (which survived because old_L is being restored, not closed)
+        // comes back.
+        timers.clear();
+        timers          = std::move(old_timers);
         next_hook_id    = old_next_hook_id;
+        next_timer_id   = old_next_timer_id;
         settings        = old_settings;
         wlr_log(WLR_ERROR,
                 "rc.lua reload failed, keeping previous config running");

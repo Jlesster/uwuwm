@@ -1,553 +1,686 @@
-diff --git a/lib/meta/uwu.lua b/lib/meta/uwu.lua
-index 3f310c9..d46e088 100644
---- a/lib/meta/uwu.lua
-+++ b/lib/meta/uwu.lua
-@@ -51,6 +51,27 @@ function uwu.reload() end
- ---@param fn fun()
- function uwu.bind(mods, key, fn) end
+diff --git a/meson.build b/meson.build
+index b66a7aa..ef631d4 100644
+--- a/meson.build
++++ b/meson.build
+@@ -59,6 +59,15 @@ if not lua_dep.found()
+     lua_dep = dependency('lua', required: true)
+ endif
 
-+---Registers a mousebind: `mods` (same names as uwu.bind above) plus a
-+---pointer button -- "left"/"right"/"middle"/"side"/"extra" (or a raw
-+---BTN_* evdev name/number) -- pressed while the cursor is over a client.
-+---`fn` is called as `fn(client)` with that client, and the whole click is
-+---consumed by the compositor (not forwarded to the app underneath) if a
-+---bind matches. This is what floating-window drag-move/drag-resize is
-+---built on -- sway/i3's floating_modifier equivalent:
-+---
-+---    uwu.mousebind({"mod"}, "left", function(c) c:begin_move() end)
-+---    uwu.mousebind({"mod"}, "right", function(c) c:begin_resize() end)
-+---
-+---Both begin_move()/begin_resize() are silent no-ops on a tiled or
-+---fullscreen client -- a mousebind fires on whatever's under the cursor,
-+---so no error just because that happens to not be floating right now. An
-+---unknown button name is logged and skipped, same as an unknown key name
-+---in uwu.bind above.
-+---@param mods string[]
-+---@param button string
-+---@param fn fun(client: Client)
-+function uwu.mousebind(mods, button, fn) end
++# Text shaping (HarfBuzz) + rasterization (FreeType) for uwu.bar.* (see
++# src/text.hpp/bar.hpp) -- deliberately not cairo+pango: those pull in a
++# full 2D vector-graphics stack and a text-layout engine on top of it for
++# what a single-line status-bar label needs, which is shaping + glyph
++# bitmaps and nothing else. freetype2/harfbuzz's pkg-config module names
++# are exactly that, on every distro this has ever needed patching for.
++freetype_dep = dependency('freetype2')
++harfbuzz_dep = dependency('harfbuzz')
 +
- -- ── settings ─────────────────────────────────────────────────────────────
+ deps = [
+     wlroots_dep,
+     wayland_server_dep,
+@@ -67,6 +76,8 @@ deps = [
+     pixman_dep,
+     xcb_dep,
+     lua_dep,
++    freetype_dep,
++    harfbuzz_dep,
+ ]
 
- ---@deprecated Use uwu.visual.set() (7 appearance fields) or
-@@ -424,6 +445,20 @@ function Client:move(x, y) end
- ---@param height integer
- function Client:resize(width, height) end
+ # ── C++-incompatible wlroots headers ────────────────────────────────────
+@@ -140,6 +151,8 @@ src = files(
+     'src/ipc.cpp',
+     'src/layershell.cpp',
+     'src/layout.cpp',
++    'src/text.cpp',
++    'src/bar.cpp',
+     'src/lua_config.cpp',
+ )
 
-+---Starts an interactive drag-move grab for this client -- the mouse
-+---equivalent of dragging a titlebar, driven by cursor motion instead of
-+---an absolute (x, y). Meant to be called from a uwu.mousebind() closure.
-+---Silent no-op on a tiled or fullscreen client.
-+function Client:begin_move() end
-+
-+---Starts an interactive drag-resize grab for this client. Which edges
-+---grow/shrink is picked from which quadrant of the window the cursor was
-+---over when the bind fired (left half drags the left edge, top half
-+---drags the top edge, etc), the same convention i3/sway's
-+---floating_modifier resize-drag uses. Meant to be called from a
-+---uwu.mousebind() closure. Silent no-op on a tiled or fullscreen client.
-+function Client:begin_resize() end
-+
- ---@class uwu.client
- uwu.client = {}
-
-diff --git a/lib/paw/init.lua b/lib/paw/init.lua
-index 711f7f0..30fc704 100644
---- a/lib/paw/init.lua
-+++ b/lib/paw/init.lua
-@@ -298,6 +298,32 @@ paw.client = {
-     end
-     c:resize(c.geo.width + dw, c.geo.height + dh)
-   end,
-+
-+  -- paw.client.begin_move()/begin_resize() -- keyboard-armed version of
-+  -- the c:begin_move()/c:begin_resize() grabs uwu.mousebind() closures
-+  -- normally call: a keybind (e.g. mod+z/mod+x) arms the grab on the
-+  -- *focused* client instead of whatever's under the cursor at press
-+  -- time, then ordinary mouse motion drives it exactly like a
-+  -- mousebind-started drag would -- the grab doesn't care how it got
-+  -- armed, only that cursor_mode is now Move/Resize (see
-+  -- processCursorMotion in input.cpp). Ends the same way too: click any
-+  -- button to drop it. No-op (not an error) with no focused client, same
-+  -- reasoning move()/resize() above give; begin_move()/begin_resize()
-+  -- themselves are already silent no-ops on a tiled/fullscreen client.
-+  begin_move = function()
-+    local c = uwu.client.focused()
-+    if not c then
-+      return
-+    end
-+    c:begin_move()
-+  end,
-+  begin_resize = function()
-+    local c = uwu.client.focused()
-+    if not c then
-+      return
-+    end
-+    c:begin_resize()
-+  end,
- }
-
- -- ── keybinds ─────────────────────────────────────────────────────────────
-diff --git a/rc.lua b/rc.lua
-index af255e5..0d2a44b 100644
---- a/rc.lua
-+++ b/rc.lua
-@@ -254,6 +254,17 @@ local keys = {
-     end,
-     'shrink floating window height',
-   },
-+
-+  -- Keyboard-armed move/resize -- mod+z arms an interactive drag-move on
-+  -- the focused client, mod+x arms drag-resize; move the mouse to
-+  -- actually move/resize it, click any button to drop it. Same grab
-+  -- mod+drag/mod+right-drag start below (see uwu.mousebind() calls near
-+  -- the end of this file), just armed by a key on the focused client
-+  -- instead of a click on whatever's under the cursor. No-op with
-+  -- nothing focused, or on a tiled/fullscreen client.
-+  { mod, 'z', paw.client.begin_move, 'keyboard-arm drag-move (mouse to move, click to drop)' },
-+  { mod, 'x', paw.client.begin_resize, 'keyboard-arm drag-resize (mouse to resize, click to drop)' },
-+
-   {
-     mod,
-     'i',
-@@ -425,6 +436,23 @@ end)
-
- paw.keys(keys)
-
-+-- Floating-window drag-move/drag-resize -- sway/i3's floating_modifier
-+-- equivalent. Hold `mod` and drag with the left button anywhere on a
-+-- floating client (not just a titlebar -- there isn't one) to move it;
-+-- mod+right-drag resizes it, picking which edge grows/shrinks from
-+-- whichever quadrant of the window the cursor was over when the drag
-+-- started. Both are silent no-ops on a tiled/fullscreen client, same as
-+-- the mod+alt nudge binds above -- click-dragging something that isn't
-+-- floating yet does nothing until mod+space has floated it first. See
-+-- mod+z/mod+x above for a keyboard-armed version of the same grab that
-+-- doesn't need a click to start it.
-+uwu.mousebind({ 'mod' }, 'left', function(c)
-+  c:begin_move()
-+end)
-+uwu.mousebind({ 'mod' }, 'right', function(c)
-+  c:begin_resize()
-+end)
-+
- -- uwu.tag.close_all(n) gracefully closes every window on tag n --
- -- destructive, so it's deliberately not bound to a key here. Wire it up
- -- yourself if you want it, e.g. a dedicated "close everything on tag 9"
-diff --git a/src/input.cpp b/src/input.cpp
-index 23daca6..13af9d2 100644
---- a/src/input.cpp
-+++ b/src/input.cpp
-@@ -640,13 +640,24 @@ void setupCursor(Server& server) {
-         [&server](wlr_pointer_button_event* event) {
-             notifyIdleActivity(server);
-
--            wlr_seat_pointer_notify_button(
--                server.seat, event->time_msec, event->button, event->state);
--
-             if(event->state == WL_POINTER_BUTTON_STATE_RELEASED) {
-+                bool was_mousebind_grab = server.mousebind_grab_active;
-                 if(server.cursor_mode != CursorMode::Passthrough) {
-                     resetCursorMode(server);
-                 }
-+                if(was_mousebind_grab) {
-+                    // This press was consumed by a uwu.mousebind() grab
-+                    // below and never reached the client (see the
-+                    // PRESSED branch) -- the matching release shouldn't
-+                    // either, or an app would see a lone button-up with
-+                    // no preceding button-down. A client-initiated grab
-+                    // (request_move/request_resize) *did* see its press
-+                    // via the ordinary path below, so its release still
-+                    // gets forwarded same as before.
-+                    return;
-+                }
-+                wlr_seat_pointer_notify_button(
-+                    server.seat, event->time_msec, event->button, event->state);
-                 return;
-             }
-
-@@ -654,6 +665,35 @@ void setupCursor(Server& server) {
-             double       sx, sy;
-             View*        v = desktopViewAt(
-                 server, server.cursor->x, server.cursor->y, &surface, &sx, &sy);
-+
-+            // uwu.mousebind() -- floating-window drag-move/drag-resize,
-+            // sway/i3's floating_modifier equivalent. Checked before the
-+            // click is forwarded to the client: a matching bind grabs the
-+            // whole click for the compositor (focuses the view, invokes
-+            // the bound Lua closure -- typically client:begin_move() or
-+            // client:begin_resize() -- and stops there) instead of *also*
-+            // sending it on to whatever's under the cursor, same reason
-+            // sway doesn't let a modifier-drag also draw a text selection
-+            // in the app underneath it.
-+            if(v && !v->unmanaged) {
-+                uint32_t mods_state = 0;
-+                if(wlr_keyboard* kb = wlr_seat_get_keyboard(server.seat)) {
-+                    mods_state =
-+                        wlr_keyboard_get_modifiers(kb) & kBindableMods;
-+                }
-+                for(const auto& mb : server.lua_cfg.mousebinds) {
-+                    if(mb.mods == mods_state && mb.button == event->button) {
-+                        server.focusView(v);
-+                        server.mousebind_grab_active = true;
-+                        server.lua_cfg.invokeWithClient(mb.fn_ref, v);
-+                        return;
-+                    }
-+                }
-+            }
-+
-+            wlr_seat_pointer_notify_button(
-+                server.seat, event->time_msec, event->button, event->state);
-+
-             // Unmanaged (X11 override-redirect) windows -- menus,
-             // tooltips, DND icons -- don't take keyboard focus on click,
-             // same as every other compositor.
-@@ -776,8 +816,9 @@ void processCursorMotion(Server& server, uint32_t time_msec) {
- }
-
- void resetCursorMode(Server& server) {
--    server.cursor_mode  = CursorMode::Passthrough;
--    server.grabbed_view = nullptr;
-+    server.cursor_mode          = CursorMode::Passthrough;
-+    server.grabbed_view         = nullptr;
-+    server.mousebind_grab_active = false;
- }
-
- bool shortcutsInhibited(Server& server) {
 diff --git a/src/lua_config.cpp b/src/lua_config.cpp
-index 3f61e27..ef1fc4e 100644
+index 7e6393b..30ce97d 100644
 --- a/src/lua_config.cpp
 +++ b/src/lua_config.cpp
-@@ -9,6 +9,7 @@ extern "C" {
-
- #include <lauxlib.h>
- #include <libinput.h>
-+#include <linux/input-event-codes.h>
- #include <lua.h>
- #include <lualib.h>
- #include <sys/wait.h>
-@@ -162,6 +163,26 @@ uint32_t parseModTable(lua_State* L, int idx) {
-     return mods;
- }
-
-+// Parses a uwu.mousebind() button argument: "left"/"right"/"middle" (the
-+// common case), the underlying BTN_LEFT/BTN_RIGHT/BTN_MIDDLE evdev name if
-+// someone wants to be explicit, or a bare number for anything else (e.g. a
-+// side button whose code isn't worth naming here). Returns 0 -- never a
-+// real evdev button code -- on anything unrecognized, which l_mousebind
-+// below logs and skips (same treatment l_bind gives an unknown key name)
-+// rather than registering a bind that can never fire.
-+uint32_t parseButtonName(lua_State* L, int idx) {
-+    if(lua_isnumber(L, idx)) {
-+        return static_cast<uint32_t>(lua_tointeger(L, idx));
-+    }
-+    std::string b = luaL_checkstring(L, idx);
-+    if(b == "left" || b == "BTN_LEFT") { return BTN_LEFT; }
-+    if(b == "right" || b == "BTN_RIGHT") { return BTN_RIGHT; }
-+    if(b == "middle" || b == "BTN_MIDDLE") { return BTN_MIDDLE; }
-+    if(b == "side" || b == "BTN_SIDE") { return BTN_SIDE; }
-+    if(b == "extra" || b == "BTN_EXTRA") { return BTN_EXTRA; }
-+    return 0;
-+}
-+
- template <typename T>
- void getOptionalField(
-     lua_State* L, int table_idx, const char* field, T& out, bool& has_value) {
-@@ -640,6 +661,31 @@ int l_client_resize(lua_State* L) {
+@@ -686,17 +686,6 @@ int l_client_begin_resize(lua_State* L) {
      return 0;
  }
 
-+// c:begin_move() / c:begin_resize() -- kick the compositor into an
-+// interactive drag-move/drag-resize grab for this client, the same grab
-+// XdgToplevel::handleRequestMove/handleRequestResize enter when a
-+// client's own CSD asks for one. Meant to be called from a
-+// uwu.mousebind() closure so rc.lua decides *when* a drag starts (which
-+// modifier+button combo) rather than it being hardwired into the button
-+// handler. Both are quiet no-ops on a tiled or fullscreen client (see
-+// View::beginInteractiveMove/Resize's own guard) rather than the loud
-+// luaL_error move()/resize() above use -- a mousebind fires on whatever's
-+// under the cursor, tiled or floating, and that's the expected common
-+// case rather than a mistake worth erroring over. begin_resize() doesn't
-+// take edges: it picks them from which quadrant of the window the cursor
-+// is currently over, see View::beginInteractiveResizeFromCursor.
-+int l_client_begin_move(lua_State* L) {
-+    View* view = checkClient(L, 1);
-+    view->beginMoveFromMousebind();
-+    return 0;
-+}
-+
-+int l_client_begin_resize(lua_State* L) {
-+    View* view = checkClient(L, 1);
-+    view->beginResizeFromMousebind();
-+    return 0;
-+}
-+
- const luaL_Reg kClientMethods[] = {
-     {"focus",          l_client_focus         },
-     {"kill",           l_client_kill          },
-@@ -649,6 +695,8 @@ const luaL_Reg kClientMethods[] = {
-     {"move_to_output", l_client_move_to_output},
-     {"move",           l_client_move          },
-     {"resize",         l_client_resize        },
-+    {"begin_move",     l_client_begin_move    },
-+    {"begin_resize",   l_client_begin_resize  },
+-const luaL_Reg kClientMethods[] = {
+-    {"focus",          l_client_focus         },
+-    {"kill",           l_client_kill          },
+-    {"set_tag",        l_client_set_tag       },
+-    {"toggle_tag",     l_client_toggle_tag    },
+-    {"set_tags_mask",  l_client_set_tags_mask },
+-    {"move_to_output", l_client_move_to_output},
+-    {"move",           l_client_move          },
+-    {"resize",         l_client_resize        },
+-    {"begin_move",     l_client_begin_move    },
+-    {"begin_resize",   l_client_begin_resize  },
      {nullptr,          nullptr                },
  };
 
-@@ -872,6 +920,32 @@ int l_bind(lua_State* L) {
+@@ -1496,6 +1485,61 @@ int l_unhook(lua_State* L) {
      return 0;
  }
 
-+// uwu.mousebind(mods, button, fn) -- see LuaMousebind's doc comment in
-+// lua_config.hpp. `fn` is called as fn(client) -- the view under the
-+// cursor when the bound button+modifier combo is pressed -- typically to
-+// call client:begin_move() or client:begin_resize(). Same "log and skip
-+// rather than luaL_error" treatment l_bind gives an unknown key name: one
-+// typo'd button name in rc.lua shouldn't silently discard every mousebind
-+// that follows it in the file.
-+int l_mousebind(lua_State* L) {
-+    uint32_t mods   = parseModTable(L, 1);
-+    uint32_t button = parseButtonName(L, 2);
-+    luaL_checktype(L, 3, LUA_TFUNCTION);
++// ----------------------------------------------------------------------------
++// uwu.timer.set_interval / set_timeout / cancel
++// ----------------------------------------------------------------------------
 +
-+    if(button == 0) {
-+        wlr_log(WLR_ERROR,
-+                "uwu.mousebind: unknown button name, skipping this binding");
-+        return 0;
-+    }
-+
-+    lua_pushvalue(L, 3);
++// uwu.timer.set_interval(seconds, fn) -> id. Calls fn every `seconds`
++// (fractional allowed -- 0.5 is a valid half-second tick), starting
++// `seconds` after this call, until uwu.timer.cancel(id) or a reload.
++// Nothing in uwuwm had a clock-tick primitive before this -- a bar
++// widget (see bar.hpp) redrawing a clock, or anything else that wants
++// "run this periodically" instead of only ever reacting to a hook, needs
++// it. fn receives no arguments, invoked through the same guardedCall
++// timeout/recursion-guard path every keybind/hook already runs under.
++int l_timer_set_interval(lua_State* L) {
++    double seconds = luaL_checknumber(L, 1);
++    luaL_checktype(L, 2, LUA_TFUNCTION);
++    lua_pushvalue(L, 2);
 +    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
++    int ms  = static_cast<int>(seconds * 1000.0);
++    int id  = getConfig(L)->addTimer(ref, ms, ms);
++    lua_pushinteger(L, id);
++    return 1;
++}
 +
-+    LuaConfig* cfg = getConfig(L);
-+    cfg->mousebinds.push_back({mods, button, ref});
++// uwu.timer.set_timeout(seconds, fn) -> id. Calls fn exactly once,
++// `seconds` from now, then automatically removes itself -- the id is
++// still valid to pass to uwu.timer.cancel() beforehand, to call it off
++// before it ever fires.
++int l_timer_set_timeout(lua_State* L) {
++    double seconds = luaL_checknumber(L, 1);
++    luaL_checktype(L, 2, LUA_TFUNCTION);
++    lua_pushvalue(L, 2);
++    int ref = luaL_ref(L, LUA_REGISTRYINDEX);
++    int ms  = static_cast<int>(seconds * 1000.0);
++    int id  = getConfig(L)->addTimer(ref, ms, 0);
++    lua_pushinteger(L, id);
++    return 1;
++}
++
++// uwu.timer.cancel(id) -- stops a set_interval before its next tick, or
++// a set_timeout before it ever fires. A no-op (not an error) on an
++// already-fired one-shot or an already-cancelled id, same "unknown id is
++// harmless" convention uwu.unhook() follows.
++int l_timer_cancel(lua_State* L) {
++    int id = static_cast<int>(luaL_checkinteger(L, 1));
++    getConfig(L)->cancelTimer(id);
 +    return 0;
 +}
 +
- // Category-scoped setter/getter core, shared by uwu.visual.set/get and
- // uwu.behavior.set/get below. `want` restricts which category this call
- // site is allowed to touch -- a visual name reaching uwu.behavior.set (or
-@@ -2171,6 +2245,7 @@ const luaL_Reg kBehaviorFuncs[] = {
- const luaL_Reg kuwuwmFuncs[] = {
-     {"spawn",             l_spawn            },
-     {"bind",              l_bind             },
-+    {"mousebind",         l_mousebind        },
-     {"set",               l_set              },
-     {"get",               l_get              },
-     {"quit",              l_quit             },
-@@ -2572,6 +2647,22 @@ void LuaConfig::invoke(int fn_ref) {
-     }
++const luaL_Reg kTimerFuncs[] = {
++    {"set_interval", l_timer_set_interval},
++    {"set_timeout",  l_timer_set_timeout },
++    {"cancel",       l_timer_cancel      },
++    {nullptr,        nullptr             },
++};
++
+ // The actual client::manage hook every uwu.rule() call registers. A
+ // plain lua_CFunction can't capture C++ state, so the match/apply spec
+ // is baked in as Lua-registry-safe *upvalues* instead (1: match app_id
+@@ -2499,6 +2543,10 @@ void LuaConfig::init(Server& server) {
+     luaL_setfuncs(L, kWallpaperFuncs, 0);
+     lua_setfield(L, -2, "wallpaper");
+
++    lua_newtable(L);
++    luaL_setfuncs(L, kTimerFuncs, 0);
++    lua_setfield(L, -2, "timer");
++
+     lua_newtable(L);
+     luaL_setfuncs(L, kTagFuncs, 0);
+     lua_setfield(L, -2, "tag");
+@@ -2723,6 +2771,64 @@ int LuaConfig::addHook(const std::string& event, int fn_ref) {
+     return id;
  }
 
-+void LuaConfig::invokeWithClient(int fn_ref, View* view) {
-+    lua_rawgeti(L, LUA_REGISTRYINDEX, fn_ref);
-+    pushClient(L, view);
-+    guardedCall(1);
++namespace {
++// The wl_event_source callback every LuaTimer's `source` invokes.
++// `data` is the LuaTimer* itself (see addTimer below) -- everything this
++// needs out of it is copied into locals before calling invoke(), because
++// invoke() running arbitrary Lua can itself call uwu.timer.cancel() on
++// *this exact timer* (or trigger a reload), either of which erases the
++// LuaTimer this callback's `data` pointer was into. Nothing below the
++// invoke() call may dereference `timer` again for that reason -- the
++// one-shot branch only erases by id, never through the (possibly
++// already-dangling) pointer.
++int timerTrampoline(void* data) {
++    auto*      timer       = static_cast<LuaTimer*>(data);
++    LuaConfig* config      = timer->config;
++    int        fn_ref      = timer->fn_ref;
++    int        interval_ms = timer->interval_ms;
++    int        id          = timer->id;
 +
-+    // Same deferred-reload handling as invoke() above -- a mousebind
-+    // closure is just as free to call uwu.reload() as a regular keybind
-+    // is, and needs the same "wait until the Lua call stack is empty"
-+    // treatment.
-+    if(reload_pending) {
-+        wlr_log(WLR_INFO, "deferred reload requested from mousebind callback");
-+        reload_pending = false;
-+        server_->reloadConfig();
++    config->invoke(fn_ref);
++
++    // A reload (or uwu.timer.cancel(id) called on itself, from fn_ref)
++    // may have already destroyed this timer from inside invoke() above
++    // -- re-look-up by id rather than trusting `timer` still points at
++    // live memory before touching it again.
++    auto it = config->timers.find(id);
++    if(it == config->timers.end()) { return 0; }
++
++    if(interval_ms > 0) {
++        wl_event_source_timer_update(it->second->source, interval_ms);
++    } else {
++        config->timers.erase(it);
 +    }
++    return 0;
++}
++}  // namespace
++
++int LuaConfig::addTimer(int fn_ref, int delay_ms, int interval_ms) {
++    auto timer          = std::make_unique<LuaTimer>();
++    timer->config       = this;
++    timer->fn_ref       = fn_ref;
++    timer->interval_ms  = interval_ms;
++    timer->id           = next_timer_id++;
++    int id              = timer->id;
++
++    wl_event_loop* loop = wl_display_get_event_loop(server_->display);
++    timer->source = wl_event_loop_add_timer(loop, timerTrampoline, timer.get());
++    wl_event_source_timer_update(timer->source, std::max(delay_ms, 1));
++
++    timers.emplace(id, std::move(timer));
++    return id;
 +}
 +
- void LuaConfig::fireClientEvent(const std::string& event, View* view) {
-     // Copy the ids of hooks registered for this event *before* invoking
-     // any of them -- a hook is free to call uwu.unhook() on itself or on
-@@ -2649,6 +2740,7 @@ bool LuaConfig::reload() {
-     // include losing the very reload keybind you just used to get here.
-     lua_State*                          old_L        = L;
-     std::multimap<uint32_t, LuaKeybind> old_keybinds = std::move(keybinds);
-+    std::vector<LuaMousebind>           old_mousebinds = std::move(mousebinds);
-     std::vector<MonitorRule>            old_rules    = std::move(monitor_rules);
-     std::vector<InputRule>     old_input_rules       = std::move(input_rules);
++void LuaConfig::cancelTimer(int id) {
++    auto it = timers.find(id);
++    if(it == timers.end()) { return; }
++    luaL_unref(L, LUA_REGISTRYINDEX, it->second->fn_ref);
++    timers.erase(it);
++}
++
+ void LuaConfig::removeHook(int id) {
+     auto it = std::find_if(hooks.begin(), hooks.end(), [id](const LuaHook& h) {
+         return h.id == id;
+@@ -2745,8 +2851,10 @@ bool LuaConfig::reload() {
+     std::vector<InputRule>     old_input_rules     = std::move(input_rules);
      std::vector<WallpaperRule> old_wallpaper_rules = std::move(wallpaper_rules);
-@@ -2657,6 +2749,7 @@ bool LuaConfig::reload() {
-     int                        old_next_hook_id    = next_hook_id;
+     std::vector<LuaHook>       old_hooks           = std::move(hooks);
+-    RuntimeConfig              old_settings        = settings;
+-    int                        old_next_hook_id    = next_hook_id;
++    std::unordered_map<int, std::unique_ptr<LuaTimer>> old_timers =
++        std::move(timers);
++    RuntimeConfig old_settings     = settings;
++    int           old_next_hook_id = next_hook_id;
 
      keybinds.clear();
-+    mousebinds.clear();
-     monitor_rules.clear();
+     mousebinds.clear();
+@@ -2754,6 +2862,7 @@ bool LuaConfig::reload() {
      input_rules.clear();
      wallpaper_rules.clear();
-@@ -2671,9 +2764,11 @@ bool LuaConfig::reload() {
+     hooks.clear();
++    timers.clear();
+     next_hook_id = 1;
+     settings     = RuntimeConfig{};
+     L            = nullptr;
+@@ -2763,16 +2872,23 @@ bool LuaConfig::reload() {
+
      if(ok) {
          if(old_L) { lua_close(old_L); }
++        // old_timers' unique_ptrs go out of scope right here, each
++        // ~LuaTimer tearing down its wl_event_source -- their fn_refs
++        // pointed into old_L, already closed above, so there's nothing
++        // left to individually luaL_unref (same reasoning as hooks: a
++        // whole-state lua_close() invalidates every ref in it without
++        // needing per-ref cleanup first).
          wlr_log(WLR_INFO,
--                "rc.lua reload ok: %zu keybind(s), %zu monitor rule(s), "
-+                "rc.lua reload ok: %zu keybind(s), %zu mousebind(s), "
-+                "%zu monitor rule(s), "
-                 "%zu input rule(s), %zu wallpaper rule(s), %zu hook(s)",
+                 "rc.lua reload ok: %zu keybind(s), %zu mousebind(s), "
+-                "%zu monitor rule(s), "
+-                "%zu input rule(s), %zu wallpaper rule(s), %zu hook(s)",
++                "%zu monitor rule(s), %zu input rule(s), %zu wallpaper "
++                "rule(s), %zu hook(s), %zu timer(s)",
                  keybinds.size(),
-+                mousebinds.size(),
+                 mousebinds.size(),
                  monitor_rules.size(),
                  input_rules.size(),
                  wallpaper_rules.size(),
-@@ -2682,6 +2777,7 @@ bool LuaConfig::reload() {
+-                hooks.size());
++                hooks.size(),
++                timers.size());
+     } else {
          if(L) { lua_close(L); }
          L               = old_L;
-         keybinds        = std::move(old_keybinds);
-+        mousebinds      = std::move(old_mousebinds);
-         monitor_rules   = std::move(old_rules);
+@@ -2782,6 +2898,13 @@ bool LuaConfig::reload() {
          input_rules     = std::move(old_input_rules);
          wallpaper_rules = std::move(old_wallpaper_rules);
+         hooks           = std::move(old_hooks);
++        // Same treatment as the success branch, just the other way
++        // around -- `timers` (populated during the *failed* load, before
++        // it errored out) gets torn down here instead, and old_timers
++        // (which survived because old_L is being restored, not closed)
++        // comes back.
++        timers.clear();
++        timers          = std::move(old_timers);
+         next_hook_id    = old_next_hook_id;
+         settings        = old_settings;
+         wlr_log(WLR_ERROR,
 diff --git a/src/lua_config.hpp b/src/lua_config.hpp
-index d54d67d..912b0eb 100644
+index 912b0eb..87ebad2 100644
 --- a/src/lua_config.hpp
 +++ b/src/lua_config.hpp
-@@ -209,6 +209,20 @@ struct LuaKeybind {
-                       // lifetime of the owning LuaConfig's lua_State.
+@@ -4,16 +4,21 @@ extern "C" {
+ struct lua_State;
+ }
+
++#include <wayland-server-core.h>
++
+ #include "wallpaper.hpp"
+
+ #include <cstdint>
+ #include <map>
++#include <memory>
+ #include <string>
++#include <unordered_map>
+ #include <vector>
+
+ class Server;
+ struct View;
+ struct Output;
++class LuaConfig;
+
+ // Runtime-tunable settings that used to be compile-time constants in
+ // config.hpp. Defaults below match the old cfg:: values exactly; rc.lua
+@@ -236,6 +241,35 @@ struct LuaHook {
+     int         fn_ref;
  };
 
-+// uwu.mousebind(mods, button, fn) -- same idea as LuaKeybind above, but for
-+// a modifier+pointer-button combo instead of a modifier+key one. This is
-+// what floating-window drag-move/drag-resize is built on (sway/i3's
-+// floating_modifier equivalent): rc.lua binds e.g. {"mod"}+left to a
-+// closure that calls client:begin_move(), and {"mod"}+right to one that
-+// calls client:begin_resize(). Dispatched from the cursor-button handler
-+// in input.cpp against whichever view is under the cursor at press time,
-+// the same way LuaKeybind is dispatched against whichever keysym came in.
-+struct LuaMousebind {
-+    uint32_t mods;
-+    uint32_t button;  // linux/input-event-codes.h BTN_* value
-+    int      fn_ref;
++// uwu.timer.set_interval(seconds, fn)/set_timeout(seconds, fn) -- the
++// clock-tick primitive a bar widget needs (see bar.hpp) that nothing in
++// uwuwm had before it. `source` is the real wl_event_source driving this;
++// owning it in a unique_ptr-held struct (not a bare int id like LuaHook)
++// is what lets ~LuaTimer clean it up via wl_event_source_remove just by
++// going out of scope -- LuaConfig::timers below is keyed the same way
++// hooks/hooks_id are, but holds unique_ptr<LuaTimer> instead of LuaTimer
++// by value for exactly that reason.
++struct LuaTimer {
++    LuaConfig*        config = nullptr;
++    wl_event_source*  source = nullptr;
++    // -2 is LUA_NOREF -- spelled out rather than pulling in <lua.h> for
++    // one constant, matching this header's existing forward-declare-only
++    // treatment of lua_State above.
++    int fn_ref = -2;
++    // Re-arm value in milliseconds; 0 means one-shot (set_timeout): the
++    // callback removes this timer from LuaConfig::timers right after
++    // firing once, instead of calling wl_event_source_timer_update
++    // again. The *first* delay (same as interval_ms for set_interval,
++    // independently given for set_timeout) is passed straight to
++    // addTimer(), not stored here -- see its doc comment.
++    int interval_ms = 0;
++    int id           = 0;
++
++    ~LuaTimer() {
++        if(source) { wl_event_source_remove(source); }
++    }
 +};
 +
- // One uwu.hook(event, fn) registration. `id` is what uwu.unhook() takes;
- // handed out sequentially by LuaConfig::next_hook_id rather than reusing
- // the registry ref itself, so a hook can be unregistered from *inside*
-@@ -253,6 +267,14 @@ public:
-     // the whole compositor down.
-     void invoke(int fn_ref);
+ // Owns the Lua VM and exposes the `uwuwm` API table rc.lua programs
+ // against. This is uwuwm's equivalent of AwesomeWM's rc.lua runtime: one
+ // global table, plain functions and closures, loaded once at startup from
+@@ -339,6 +373,29 @@ public:
+     std::vector<LuaHook> hooks;
+     int                  next_hook_id = 1;
 
-+    // Same as invoke(), but calls fn_ref with a single argument: a fresh
-+    // Client userdata wrapping `view` (see checkClient()/pushClient() in
-+    // lua_config.cpp). Used for uwu.mousebind() closures, which -- unlike
-+    // plain keybinds -- are dispatched against whatever view happened to
-+    // be under the cursor at press time, so the closure needs a handle to
-+    // it (typically to call client:begin_move()/:begin_resize()).
-+    void invokeWithClient(int fn_ref, View* view);
++    // uwu.timer.set_interval/set_timeout register here; l_timer_cancel
++    // and reload() both remove through cancelTimer()/direct erase --
++    // see LuaTimer's own comment for why this is unique_ptr-keyed rather
++    // than a flat vector like hooks.
++    std::unordered_map<int, std::unique_ptr<LuaTimer>> timers;
++    int                                                 next_timer_id = 1;
 +
-     // Fully reloads rc.lua from scratch: clears keybinds/monitor_rules,
-     // resets settings back to RuntimeConfig{} defaults, closes the
-     // current Lua VM, and re-runs init()+load() on a brand new one --
-@@ -308,6 +330,7 @@ public:
-
-     RuntimeConfig                       settings;
-     std::multimap<uint32_t, LuaKeybind> keybinds;
-+    std::vector<LuaMousebind>           mousebinds;
-
-     // Registered by uwu.hook(), consumed by fire*Event above. Cleared and
-     // repopulated on every reload() exactly like keybinds/monitor_rules --
-diff --git a/src/server.hpp b/src/server.hpp
-index eed9706..60f9e54 100644
---- a/src/server.hpp
-+++ b/src/server.hpp
-@@ -304,6 +304,20 @@ public:
-     wlr_box    grab_geobox{};
-     uint32_t   resize_edges = 0;
-
-+    // Set true for the duration of a uwu.mousebind()-initiated grab (see
-+    // input.cpp's cursor_button handler), false for a client-initiated one
-+    // (xdg_toplevel/xwayland request_move/request_resize, entered via
-+    // View::beginInteractiveMove/beginInteractiveResize directly). Both
-+    // land in the same cursor_mode != Passthrough state, but only the
-+    // mousebind path also skipped forwarding the *press* to the client --
-+    // a client-initiated grab's press already went through the ordinary
-+    // wlr_seat_pointer_notify_button call before the grab even started.
-+    // The button-release handler consults this to decide whether the
-+    // matching release should be forwarded too (client-initiated: yes, to
-+    // balance the press it already saw; mousebind-initiated: no, same as
-+    // the press it never saw).
-+    bool mousebind_grab_active = false;
++    // Registers a timer that calls fn_ref (already luaL_ref'd by the
++    // caller -- l_timer_set_interval/set_timeout in lua_config.cpp) first
++    // after delay_ms, then (if interval_ms > 0) every interval_ms after
++    // that indefinitely; interval_ms == 0 means fire once, at delay_ms,
++    // then self-remove. set_interval passes the same value for both;
++    // set_timeout passes interval_ms = 0. Returns the id
++    // uwu.timer.cancel() takes.
++    int addTimer(int fn_ref, int delay_ms, int interval_ms);
 +
-     void    focusView(View* view);
-     void    closeOnTag(uint32_t tagmask);
-     Output* outputAt(double lx, double ly);
-diff --git a/src/view.cpp b/src/view.cpp
-index fc066fc..9855585 100644
---- a/src/view.cpp
-+++ b/src/view.cpp
-@@ -7,6 +7,7 @@ extern "C" {
- #include <wlr/types/wlr_foreign_toplevel_management_v1.h>
- #include <wlr/types/wlr_scene.h>
- #include <wlr/types/wlr_seat.h>
-+#include <wlr/util/edges.h>
- }
-
- #include "idle.hpp"
-@@ -40,8 +41,9 @@ View::~View() {
-
-     if(server.focused_view == this) { server.focused_view = nullptr; }
-     if(server.grabbed_view == this) {
--        server.grabbed_view = nullptr;
--        server.cursor_mode  = CursorMode::Passthrough;
-+        server.grabbed_view          = nullptr;
-+        server.cursor_mode           = CursorMode::Passthrough;
-+        server.mousebind_grab_active = false;
-     }
-     // Recursive: tears down border_tree/border_rects and whatever of
-     // content_tree is still alive (for XdgToplevel, the client's own
-@@ -479,6 +481,16 @@ void View::beginInteractiveResize(uint32_t edges) {
-     server.grab_geobox  = geo;
- }
-
-+void View::beginInteractiveResizeFromCursor() {
-+    if(!is_floating || is_fullscreen) { return; }
-+    double mid_x = geo.x + geo.width / 2.0;
-+    double mid_y = geo.y + geo.height / 2.0;
-+    uint32_t edges =
-+        (server.cursor->x < mid_x ? WLR_EDGE_LEFT : WLR_EDGE_RIGHT) |
-+        (server.cursor->y < mid_y ? WLR_EDGE_TOP : WLR_EDGE_BOTTOM);
-+    beginInteractiveResize(edges);
++    // uwu.timer.cancel(id) -- luaL_unref's fn_ref (the timer is being
++    // individually removed while L stays alive, unlike a reload where
++    // the whole L closing makes that unnecessary -- see removeHook's
++    // identical situation) and erases the entry, whose destructor tears
++    // down the wl_event_source.
++    void cancelTimer(int id);
++
+     // Populated by uwu.monitor.set() calls in rc.lua (and by any later
+     // runtime uwu.monitor.set() calls from keybinds/scripts). Consulted by
+     // Output's constructor when a monitor is (re)plugged in, and applied
+diff --git a/src/text.cpp b/src/text.cpp
+new file mode 100644
+index 0000000..b052104
+--- /dev/null
++++ b/src/text.cpp
+@@ -0,0 +1,241 @@
++#include "text.hpp"
++
++extern "C" {
++#include <wlr/util/log.h>
 +}
 +
- void View::setOpacity(float alpha) {
-     setOpacity(alpha, server.focused_view == this);
- }
-diff --git a/src/view.hpp b/src/view.hpp
-index ba23678..8802ab8 100644
---- a/src/view.hpp
-+++ b/src/view.hpp
-@@ -275,6 +275,17 @@ struct View {
-     // includes view.hpp, and view.hpp only forward-declares it.
-     void applyOpacityOverride();
-
-+    // Thin public wrappers around the protected beginInteractiveMove()/
-+    // beginInteractiveResizeFromCursor() below, for the exact same reason
-+    // applyOpacityOverride() above is a wrapper around protected
-+    // setOpacity(): uwu.mousebind() closures call client:begin_move()/
-+    // :begin_resize() (l_client_begin_move/l_client_begin_resize in
-+    // lua_config.cpp), which are free C functions, not View members, and
-+    // so can't reach the protected methods directly the way
-+    // XdgToplevel::handleRequestMove/XWaylandView::handleRequestMove can.
-+    void beginMoveFromMousebind() { beginInteractiveMove(); }
-+    void beginResizeFromMousebind() { beginInteractiveResizeFromCursor(); }
++#include <ft2build.h>
++#include FT_FREETYPE_H
++#include <hb-ft.h>
++#include <hb.h>
 +
- protected:
-     // Shared implementations for the request_move/request_resize handlers
-     // every backend has (xdg_toplevel and xwayland both expose them) --
-@@ -282,6 +293,19 @@ protected:
-     void beginInteractiveMove();
-     void beginInteractiveResize(uint32_t edges);
-
-+    // Same as beginInteractiveResize(edges), but picks `edges` itself from
-+    // which quadrant of the window the cursor is currently over (left half
-+    // drags the left edge, top half drags the top edge, etc) instead of
-+    // requiring the caller to know which edge it wants up front -- the
-+    // same "resize from the nearest edge/corner" convention i3/sway's
-+    // floating_modifier resize-drag uses. Meant for uwu.mousebind()
-+    // closures (client:begin_resize(), via beginResizeFromMousebind()
-+    // above) where the bind fires from wherever the cursor happened to
-+    // be, not from a specific titlebar corner the way
-+    // XdgToplevel::handleRequestResize's edges (driven by the client's
-+    // own CSD hit-test) are.
-+    void beginInteractiveResizeFromCursor();
++#include <cstring>
++#include <unordered_map>
++#include <vector>
 +
-     // Starts the "grow-in" open animation (fade 0->1, slight upward
-     // slide-in) from the view's current `geo`. Call once, right after the
-     // subclass has placed the view at its real final geo (see
++// ---------------------------------------------------------------------------
++// A rasterized glyph, copied out of FT_GlyphSlot's bitmap into a tightly
++// packed (no pitch padding) 8-bit coverage buffer, cached forever keyed
++// by (face, size, glyph index) -- a status bar redraws the same handful
++// of glyphs (digits, a few dozen letters) over and over, most commonly
++// every second off a clock timer, so re-rasterizing on every commit()
++// would be pure waste. Assumes FT_LOAD_RENDER's default antialiased
++// FT_PIXEL_MODE_GRAY output (8-bit coverage, non-negative pitch) --
++// uwuwm never asks FreeType for mono/LCD rendering, so this doesn't
++// handle those.
++// ---------------------------------------------------------------------------
++struct CachedGlyph {
++    int                  width = 0, rows = 0;
++    int                  left = 0, top = 0;  // offset from pen to bitmap origin
++    std::vector<uint8_t> coverage;           // width*rows bytes, row-major
++};
++
++struct FaceEntry {
++    FT_Face    face    = nullptr;
++    hb_font_t* hb_font = nullptr;
++    bool       valid   = false;
++};
++
++struct GlyphKey {
++    std::string  face_key;
++    unsigned int glyph_id;
++    bool operator==(const GlyphKey& o) const {
++        return face_key == o.face_key && glyph_id == o.glyph_id;
++    }
++};
++struct GlyphKeyHash {
++    size_t operator()(const GlyphKey& k) const {
++        return std::hash<std::string>()(k.face_key) ^
++               (std::hash<unsigned int>()(k.glyph_id) << 1);
++    }
++};
++
++struct TextRenderer::Impl {
++    FT_Library ft     = nullptr;
++    bool       ft_ok  = false;
++
++    // Keyed on "path:pixel_size" -- a distinct FT_Face per size actually
++    // requested, never resized in place, so hb_font (bound to this exact
++    // face via hb_ft_font_create) never goes stale.
++    std::unordered_map<std::string, FaceEntry>                faces;
++    std::unordered_map<GlyphKey, CachedGlyph, GlyphKeyHash> glyph_cache;
++
++    static std::string faceKey(const std::string& path, int pixel_size) {
++        return path + ":" + std::to_string(pixel_size);
++    }
++
++    FaceEntry* getFace(const std::string& path, int pixel_size) {
++        if(!ft_ok) { return nullptr; }
++        std::string key = faceKey(path, pixel_size);
++        if(auto it = faces.find(key); it != faces.end()) {
++            return it->second.valid ? &it->second : nullptr;
++        }
++
++        FaceEntry entry;
++        if(FT_New_Face(ft, path.c_str(), 0, &entry.face)) {
++            wlr_log(WLR_ERROR, "uwu.bar: couldn't load font '%s'", path.c_str());
++            faces.emplace(key, entry);  // cache the failure too -- one log
++                                        // line per bad path, not one per
++                                        // redraw.
++            return nullptr;
++        }
++        FT_Set_Pixel_Sizes(entry.face, 0, static_cast<FT_UInt>(pixel_size));
++        entry.hb_font = hb_ft_font_create(entry.face, nullptr);
++        entry.valid   = true;
++        return &faces.emplace(key, entry).first->second;
++    }
++
++    const CachedGlyph*
++    getGlyph(const std::string& face_key, FT_Face face, unsigned int glyph_id) {
++        GlyphKey key{face_key, glyph_id};
++        if(auto it = glyph_cache.find(key); it != glyph_cache.end()) {
++            return &it->second;
++        }
++        if(FT_Load_Glyph(face, glyph_id, FT_LOAD_RENDER)) { return nullptr; }
++
++        FT_GlyphSlot slot = face->glyph;
++        CachedGlyph  cg;
++        cg.width = static_cast<int>(slot->bitmap.width);
++        cg.rows  = static_cast<int>(slot->bitmap.rows);
++        cg.left  = slot->bitmap_left;
++        cg.top   = slot->bitmap_top;
++        cg.coverage.resize(static_cast<size_t>(cg.width) * cg.rows);
++        for(int row = 0; row < cg.rows; row++) {
++            std::memcpy(cg.coverage.data() + static_cast<size_t>(row) * cg.width,
++                        slot->bitmap.buffer +
++                            static_cast<size_t>(row) * slot->bitmap.pitch,
++                        static_cast<size_t>(cg.width));
++        }
++        return &glyph_cache.emplace(key, std::move(cg)).first->second;
++    }
++
++    ~Impl() {
++        for(auto& [key, entry] : faces) {
++            if(entry.hb_font) { hb_font_destroy(entry.hb_font); }
++            if(entry.face) { FT_Done_Face(entry.face); }
++        }
++        if(ft_ok) { FT_Done_FreeType(ft); }
++    }
++};
++
++TextRenderer::TextRenderer() : impl_(new Impl()) {
++    impl_->ft_ok = (FT_Init_FreeType(&impl_->ft) == 0);
++    if(!impl_->ft_ok) {
++        wlr_log(WLR_ERROR,
++                "uwu.bar: FT_Init_FreeType failed -- text rendering disabled "
++                "for this session");
++    }
++}
++
++TextRenderer::~TextRenderer() { delete impl_; }
++
++namespace {
++// bars are drawn opaque (see Bar::clear()/fillRect() in bar.cpp) -- text
++// blends its color into whatever RGB is already there using glyph
++// coverage * color alpha as the blend factor, and always leaves the
++// destination alpha at 255 rather than doing full Porter-Duff "over"
++// compositing on the alpha channel too. A translucent whole-bar (glass
++// panel over the desktop) isn't a v1 goal; every real status bar this
++// was modeled on (waybar, polybar) is opaque in practice anyway.
++inline void blendPixel(uint8_t* dst, uint8_t r, uint8_t g, uint8_t b, float a) {
++    dst[0] = static_cast<uint8_t>(dst[0] * (1.0f - a) + r * a);
++    dst[1] = static_cast<uint8_t>(dst[1] * (1.0f - a) + g * a);
++    dst[2] = static_cast<uint8_t>(dst[2] * (1.0f - a) + b * a);
++    dst[3] = 255;
++}
++}  // namespace
++
++int TextRenderer::drawText(uint8_t*           pixels,
++                           int                stride,
++                           int                buf_w,
++                           int                buf_h,
++                           int                x,
++                           int                y,
++                           const std::string& utf8,
++                           const std::string& font_path,
++                           int                pixel_size,
++                           uint32_t           color) {
++    FaceEntry* fe = impl_->getFace(font_path, pixel_size);
++    if(!fe) { return 0; }
++
++    hb_buffer_t* buf = hb_buffer_create();
++    hb_buffer_add_utf8(buf, utf8.c_str(), -1, 0, -1);
++    hb_buffer_guess_segment_properties(buf);
++    hb_shape(fe->hb_font, buf, nullptr, 0);
++
++    unsigned int          glyph_count = 0;
++    hb_glyph_info_t*      infos       = hb_buffer_get_glyph_infos(buf, &glyph_count);
++    hb_glyph_position_t*  positions =
++        hb_buffer_get_glyph_positions(buf, &glyph_count);
++
++    std::string face_key = Impl::faceKey(font_path, pixel_size);
++
++    uint8_t cr = static_cast<uint8_t>((color >> 24) & 0xff);
++    uint8_t cg = static_cast<uint8_t>((color >> 16) & 0xff);
++    uint8_t cb = static_cast<uint8_t>((color >> 8) & 0xff);
++    uint8_t ca = static_cast<uint8_t>(color & 0xff);
++
++    double pen_x = 0, pen_y = 0;
++    for(unsigned int i = 0; i < glyph_count; i++) {
++        const CachedGlyph* g =
++            impl_->getGlyph(face_key, fe->face, infos[i].codepoint);
++        if(g && g->width > 0 && g->rows > 0) {
++            int gx = x +
++                     static_cast<int>(pen_x + positions[i].x_offset / 64.0) +
++                     g->left;
++            int gy = y -
++                     static_cast<int>(pen_y + positions[i].y_offset / 64.0) -
++                     g->top;
++            for(int row = 0; row < g->rows; row++) {
++                int py = gy + row;
++                if(py < 0 || py >= buf_h) { continue; }
++                for(int col = 0; col < g->width; col++) {
++                    int px = gx + col;
++                    if(px < 0 || px >= buf_w) { continue; }
++                    uint8_t coverage = g->coverage[static_cast<size_t>(row) *
++                                                        g->width +
++                                                    col];
++                    if(coverage == 0) { continue; }
++                    float a = (coverage / 255.0f) * (ca / 255.0f);
++                    blendPixel(pixels + py * stride + px * 4, cr, cg, cb, a);
++                }
++            }
++        }
++        pen_x += positions[i].x_advance / 64.0;
++        pen_y += positions[i].y_advance / 64.0;
++    }
++
++    hb_buffer_destroy(buf);
++    return static_cast<int>(pen_x + 0.5);
++}
++
++int TextRenderer::measureText(const std::string& utf8,
++                              const std::string& font_path,
++                              int                pixel_size) {
++    FaceEntry* fe = impl_->getFace(font_path, pixel_size);
++    if(!fe) { return 0; }
++
++    hb_buffer_t* buf = hb_buffer_create();
++    hb_buffer_add_utf8(buf, utf8.c_str(), -1, 0, -1);
++    hb_buffer_guess_segment_properties(buf);
++    hb_shape(fe->hb_font, buf, nullptr, 0);
++
++    unsigned int         glyph_count = 0;
++    hb_glyph_position_t* positions =
++        hb_buffer_get_glyph_positions(buf, &glyph_count);
++
++    double advance = 0;
++    for(unsigned int i = 0; i < glyph_count; i++) {
++        advance += positions[i].x_advance / 64.0;
++    }
++    hb_buffer_destroy(buf);
++    return static_cast<int>(advance + 0.5);
++}
++
++int TextRenderer::lineHeight(const std::string& font_path, int pixel_size) {
++    FaceEntry* fe = impl_->getFace(font_path, pixel_size);
++    if(!fe) { return 0; }
++    // face->size->metrics.height is 26.6 fixed-point pixels once
++    // FT_Set_Pixel_Sizes has been called (getFace always does, on load).
++    return static_cast<int>(fe->face->size->metrics.height >> 6);
++}
+diff --git a/src/text.hpp b/src/text.hpp
+new file mode 100644
+index 0000000..b507861
+--- /dev/null
++++ b/src/text.hpp
+@@ -0,0 +1,65 @@
++#pragma once
++
++#include <cstdint>
++#include <string>
++
++// HarfBuzz shaping + FreeType rasterization for uwu.bar.*'s :text()
++// primitive (bar.hpp/bar.cpp) -- the two pieces a single-line status-bar
++// label actually needs, without pulling in cairo/pango for full 2D
++// vector graphics + text layout on top. Deliberately opaque: nothing in
++// this header names a FreeType or HarfBuzz type, so bar.cpp and
++// lua_config.cpp (both of which need to call this) don't need either
++// library's headers in scope -- only text.cpp does.
++//
++// One TextRenderer instance lives on Server (see server.hpp) and is
++// shared by every Bar; the (font path, pixel size) -> loaded face cache
++// and the (face, size, glyph id) -> rasterized bitmap cache inside it
++// are keyed globally for that reason, not per-bar.
++class TextRenderer {
++public:
++    TextRenderer();
++    ~TextRenderer();
++
++    TextRenderer(const TextRenderer&)            = delete;
++    TextRenderer& operator=(const TextRenderer&) = delete;
++
++    // Shapes `utf8` at `font_path`/`pixel_size` (loading and caching that
++    // face the first time it's seen) and blits it into `pixels` -- RGBA8,
++    // `stride` bytes/row, `buf_w`x`buf_h` total -- with its baseline at
++    // (x, y). `color` is 0xRRGGBBAA; each glyph's FreeType coverage
++    // (antialiased 8-bit grayscale) is used as a per-pixel alpha
++    // multiplier when compositing over whatever's already in `pixels`,
++    // same straight-alpha-over blend bar.cpp's fillRect uses. Glyphs (or
++    // the whole call) that land outside buf_w/buf_h are clipped, not an
++    // error. Returns the total horizontal advance in pixels -- 0 if
++    // `font_path` couldn't be loaded (logged once per bad path, not
++    // once per call) -- so a caller can chain text after this or
++    // right/center-align by calling measureText() first.
++    int drawText(uint8_t*           pixels,
++                 int                stride,
++                 int                buf_w,
++                 int                buf_h,
++                 int                x,
++                 int                y,
++                 const std::string& utf8,
++                 const std::string& font_path,
++                 int                pixel_size,
++                 uint32_t           color);
++
++    // Same shaping pass as drawText, without rasterizing or blitting
++    // anything -- just the total horizontal advance, for alignment math
++    // (center/right-anchoring a label before committing to an x).
++    int measureText(const std::string& utf8,
++                    const std::string& font_path,
++                    int                pixel_size);
++
++    // Recommended line height (ascender - descender + linegap, in
++    // pixels) for `font_path` at `pixel_size` -- lets a widget vertically
++    // center a label in a bar of known height without a hand-picked
++    // fudge factor. 0 if the font couldn't be loaded.
++    int lineHeight(const std::string& font_path, int pixel_size);
++
++private:
++    struct Impl;
++    Impl* impl_;
++};
+diff --git a/src/toplevel.cpp b/src/toplevel.cpp
+index a869c5d..dc98095 100644
+--- a/src/toplevel.cpp
++++ b/src/toplevel.cpp
+@@ -100,8 +100,9 @@ void XdgToplevel::handleMap() {
+     updateZOrder();
+
+     wlr_log(WLR_DEBUG,
+-            "[uwuwm xdg] handleMap title='%s' parent=%p min=%dx%d "
+-            "max=%dx%d fixed_size=%d -> is_floating=%d",
++            "[uwuwm xdg] handleMap app_id='%s' title='%s' parent=%p "
++            "min=%dx%d max=%dx%d fixed_size=%d -> is_floating=%d",
++            xdg_toplevel->app_id ? xdg_toplevel->app_id : "?",
+             xdg_toplevel->title ? xdg_toplevel->title : "?",
+             (void*)xdg_toplevel->parent,
+             state.min_width,

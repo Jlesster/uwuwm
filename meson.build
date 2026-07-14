@@ -59,6 +59,15 @@ if not lua_dep.found()
     lua_dep = dependency('lua', required: true)
 endif
 
+# Text shaping (HarfBuzz) + rasterization (FreeType) for uwu.bar.* (see
+# src/text.hpp/bar.hpp) -- deliberately not cairo+pango: those pull in a
+# full 2D vector-graphics stack and a text-layout engine on top of it for
+# what a single-line status-bar label needs, which is shaping + glyph
+# bitmaps and nothing else. freetype2/harfbuzz's pkg-config module names
+# are exactly that, on every distro this has ever needed patching for.
+freetype_dep = dependency('freetype2')
+harfbuzz_dep = dependency('harfbuzz')
+
 deps = [
     wlroots_dep,
     wayland_server_dep,
@@ -67,6 +76,8 @@ deps = [
     pixman_dep,
     xcb_dep,
     lua_dep,
+    freetype_dep,
+    harfbuzz_dep,
 ]
 
 # ── C++-incompatible wlroots headers ────────────────────────────────────
@@ -140,6 +151,8 @@ src = files(
     'src/ipc.cpp',
     'src/layershell.cpp',
     'src/layout.cpp',
+    'src/text.cpp',
+    'src/bar.cpp',
     'src/lua_config.cpp',
 )
 

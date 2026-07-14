@@ -100,8 +100,9 @@ void XdgToplevel::handleMap() {
     updateZOrder();
 
     wlr_log(WLR_DEBUG,
-            "[uwuwm xdg] handleMap title='%s' parent=%p min=%dx%d "
-            "max=%dx%d fixed_size=%d -> is_floating=%d",
+            "[uwuwm xdg] handleMap app_id='%s' title='%s' parent=%p "
+            "min=%dx%d max=%dx%d fixed_size=%d -> is_floating=%d",
+            xdg_toplevel->app_id ? xdg_toplevel->app_id : "?",
             xdg_toplevel->title ? xdg_toplevel->title : "?",
             (void*)xdg_toplevel->parent,
             state.min_width,
