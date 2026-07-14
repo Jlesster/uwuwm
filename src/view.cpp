@@ -450,12 +450,19 @@ void View::setOpacity(float alpha) {
 }
 
 void View::setOpacity(float alpha, bool focused) {
-    wlr_scene_node_for_each_buffer(
-        &content_tree->node,
-        [](wlr_scene_buffer* buffer, int /*sx*/, int /*sy*/, void* data) {
-            wlr_scene_buffer_set_opacity(buffer, *static_cast<float*>(data));
-        },
-        &alpha);
+    // tickAnimation() runs every frame for every view mid-animation, so
+    // setOpacity can fire while content_tree is momentarily null during
+    // a content-tree dissociate/re-associate (see comment in applyBoxToScene
+    // above). Guard like the rest of this file does; the border still gets
+    // its color via updateBorderColor.
+    if(content_tree) {
+        wlr_scene_node_for_each_buffer(
+            &content_tree->node,
+            [](wlr_scene_buffer* buffer, int /*sx*/, int /*sy*/, void* data) {
+                wlr_scene_buffer_set_opacity(buffer, *static_cast<float*>(data));
+            },
+            &alpha);
+    }
     updateBorderColor(focused, alpha);
 }
 

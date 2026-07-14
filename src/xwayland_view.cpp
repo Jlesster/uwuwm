@@ -206,6 +206,16 @@ void XWaylandView::handleDissociate() {
     map_listener.disconnect();
     unmap.disconnect();
     surface_commit.disconnect();
+    // Do NOT wlr_scene_node_destroy(content_tree) here -- per the class
+    // comment in xwayland_view.hpp, wlr_scene_subsurface_tree_create
+    // already hooked xsurface->surface's own destroy event and self-tore-down
+    // the node by the time dissociate fires (dissociate is a consequence of
+    // that same surface teardown). Destroying it again here is a
+    // double-free on already-freed wlroots memory. All that's actually
+    // missing is clearing our own now-dangling pointer, so a stale read
+    // (e.g. handleMap's `if(content_tree)` guard) can't dereference freed
+    // memory before the next handleAssociate overwrites it.
+    content_tree = nullptr;
 }
 
 void XWaylandView::handleSurfaceCommit() {
