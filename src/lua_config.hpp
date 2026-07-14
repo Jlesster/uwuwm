@@ -80,6 +80,23 @@ struct RuntimeConfig {
     bool anim_enabled     = true;
     int  anim_duration_ms = 150;
     int  anim_slide_px    = 24;  // open/close vertical slide distance
+
+    // How much smaller than its own final size a floating window's
+    // pop-in animation starts from before growing/fading up to it (see
+    // View::playFloatPopAnimation) -- 1.0 would be no visible grow at
+    // all, values near 0 make for a very pronounced "zoom in" pop.
+    float anim_pop_scale = 0.6f;
+
+    // How big a window ends up, relative to its previous tiled content
+    // size, when it's popped out of tiling into floating via
+    // setFloating(true)/paw.client.toggle_floating()/`client.floating =
+    // true` (see View::setFloating) -- NOT used for a window that's
+    // floating from the moment it maps (dialogs/transients center at
+    // their own natural size instead, see XdgToplevel::handleMap/
+    // XWaylandView::handleMap). 1.0 would keep the old tile's full size;
+    // smaller values are what make a popped-out window read as a small,
+    // detached utility window rather than the same tile just unpinned.
+    float float_size_ratio = 0.6f;
 };
 
 // One monitor-configuration rule, set via uwu.monitor.set(name, {...}) in

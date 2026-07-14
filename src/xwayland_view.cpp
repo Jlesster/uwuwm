@@ -125,7 +125,9 @@ XWaylandView::XWaylandView(Server& server, wlr_xwayland_surface* xsurface)
     xsurface->data = this;
     unmanaged      = xsurface->override_redirect;
 
-    scene_tree            = wlr_scene_tree_create(server.window_tree);
+    // See XdgToplevel's constructor comment -- same tiled_tree-by-default,
+    // handleMap-reparents-if-floating scheme.
+    scene_tree            = wlr_scene_tree_create(server.tiled_tree);
     scene_tree->node.data = this;
 
     border_tree    = wlr_scene_tree_create(scene_tree);
@@ -258,7 +260,8 @@ void XWaylandView::handleSurfaceCommit() {
                     geo.height,
                     min_w,
                     min_h);
-            is_floating  = true;
+            is_floating = true;
+            updateZOrder();
             int     w    = min_w > 0 ? min_w : 0;
             int     h    = min_h > 0 ? min_h : 0;
             wlr_box box  = centeredFloatBox(w, h);
@@ -333,6 +336,13 @@ void XWaylandView::handleMap() {
         // No tiling, no border, no focus-follows -- position exactly
         // where X11 put it and let it render above everything else, same
         // as every other compositor treats override-redirect windows.
+        // Reparent into floating_tree (not just raise_to_top within
+        // tiled_tree, where the constructor originally placed it) --
+        // floating_tree is structurally topmost of the two (see
+        // server.hpp), so this is what actually guarantees a tooltip or
+        // context menu renders above a floating window too, not only
+        // above other tiled ones.
+        wlr_scene_node_reparent(&scene_tree->node, server.floating_tree);
         wlr_scene_node_set_enabled(&border_tree->node, false);
         geo = wlr_box{
             xsurface->x, xsurface->y, xsurface->width, xsurface->height};
@@ -362,6 +372,7 @@ void XWaylandView::handleMap() {
     // (isDialogWindowType) -- see both above.
     is_floating = xsurface->parent != nullptr || hasFixedSize(xsurface) ||
                   isDialogWindowType(server, xsurface);
+    updateZOrder();
 
     if(xsurface->title) { title = xsurface->title; }
     if(xsurface->class_) { app_id = xsurface->class_; }
@@ -405,6 +416,7 @@ void XWaylandView::handleMap() {
             if((min_w > 0 && buf_w < min_w) || (min_h > 0 && buf_h < min_h)) {
                 is_floating   = true;
                 float_for_min = true;
+                updateZOrder();
                 // Drop our tile reservation now that we're floating.
                 layout::arrange(*output);
             }
@@ -450,7 +462,11 @@ void XWaylandView::handleMap() {
 
     createForeignToplevel();
     server.focusView(this);
-    playOpenAnimation();
+    if(is_floating && !is_fullscreen) {
+        playFloatPopAnimation();
+    } else {
+        playOpenAnimation();
+    }
 
     idle::updateInhibitState(server);
 
@@ -586,7 +602,9 @@ void XWaylandView::handleSetClass() {
 // tightens back down with no extra bookkeeping. Growing a tile is
 // unaffected: the target is already the larger of the two.
 wlr_box XWaylandView::contentClipBox(const wlr_box& box) const {
-    int b        = server.lua_cfg.settings.border_px;
+    // See configureBackend -- keep the clip in agreement with the size
+    // we actually configured the X window to.
+    int b        = is_fullscreen ? 0 : server.lua_cfg.settings.border_px;
     int w        = box.width - 2 * b;
     int h        = box.height - 2 * b;
     int target_w = w, target_h = h;
@@ -613,7 +631,19 @@ wlr_box XWaylandView::contentClipBox(const wlr_box& box) const {
 }
 
 void XWaylandView::configureBackend(const wlr_box& box) {
-    int b  = server.lua_cfg.settings.border_px;
+    // See View::applyBoxToScene / XdgToplevel::configureBackend: a
+    // fullscreen X11 window must be configured at exactly
+    // output->layout_box, full stop -- border_tree is disabled for it,
+    // but configuring it 2*border_px short of the real output resolution
+    // regardless left a border_px gap on every edge (bare black scene
+    // background, since nothing draws there) instead of true edge-to-edge
+    // fullscreen. This is very likely the exact bug behind exclusive-
+    // fullscreen Proton/Wine games (CoD:IW and similar, which run as
+    // XWayland clients, not native Wayland ones) rendering solid black:
+    // asking for a size a few pixels off the real output resolution is
+    // exactly what makes a game's own swapchain presentation fail instead
+    // of just looking slightly mis-sized the way an ordinary app would.
+    int b  = is_fullscreen ? 0 : server.lua_cfg.settings.border_px;
     int vw = box.width - 2 * b;
     int vh = box.height - 2 * b;
     if(vw < 1) { vw = 1; }

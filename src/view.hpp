@@ -288,6 +288,19 @@ protected:
     // XdgToplevel::handleMap / XWaylandView::handleMap).
     void playOpenAnimation();
 
+    // Starts the "pop-in" animation used for floating windows: grows
+    // from a smaller box centered on the same point as the view's
+    // current (already-final) `geo`, fading in at the same time, rather
+    // than open's vertical slide -- a floating window appearing already
+    // detached in the middle of the screen reads as a slide from
+    // nowhere-in-particular, whereas scaling up from its own center
+    // reads as "popping out". Call once, right after the view has been
+    // placed at its real final floating geo (same call-site convention
+    // as playOpenAnimation) -- see XdgToplevel::handleMap/
+    // XWaylandView::handleMap (initial floating map) and
+    // View::setFloating (tiled -> floating toggle).
+    void playFloatPopAnimation();
+
     // Starts the "shrink-out" close animation (fade 1->0, slight downward
     // slide) against the view's *current, still fully live* content, and
     // calls closeBackend() once it finishes. This deliberately runs
@@ -321,6 +334,14 @@ protected:
     // safe -- a no-op -- when foreign_toplevel is null, so call sites
     // don't need their own guard.
     void syncForeignToplevelMeta();
+
+    // Keeps scene_tree parented under the correct always-ordered layer
+    // (server.tiled_tree or server.floating_tree) for the view's current
+    // is_floating/is_fullscreen state -- see server.hpp's comment on
+    // those two trees. Call any time either flag changes (setFloating,
+    // setFullscreen) or once at initial map, after is_floating is first
+    // known. A no-op scene-graph move only; never touches geometry.
+    void updateZOrder();
 
     // Border rects + content offset + scene_tree position, purely at the
     // scene-graph level -- no client configure. Used both by setGeometry

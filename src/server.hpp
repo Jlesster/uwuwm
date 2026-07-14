@@ -209,6 +209,26 @@ public:
     wlr_scene_tree* layer_tree[4] = {};
     wlr_scene_tree* window_tree   = nullptr;
 
+    // Two persistent sub-layers of window_tree, in this fixed order so
+    // floating_tree is *structurally* always above tiled_tree -- not
+    // just "raised for now until something else gets raised over it".
+    // Every managed View's scene_tree lives under exactly one of these
+    // at any given time (View::updateZOrder keeps it in sync with
+    // is_floating/is_fullscreen): tiled_tree for plain tiled windows,
+    // floating_tree for floating and fullscreen ones, plus unmanaged
+    // XWayland override-redirect popups (tooltips, context menus),
+    // which need to sit above literally everything. Before this
+    // existed, every view (tiled or floating) was a direct child of
+    // window_tree and z-order was purely "whoever got raise_to_top'd
+    // most recently" (Server::focusView) -- clicking a tiled window
+    // after a floating one raised the tile right over the float,
+    // burying it. Splitting into two always-ordered sub-trees means
+    // focus-order raising (which still happens, for relative order
+    // *within* whichever layer a view is in) can never let a tiled
+    // window climb above a floating one.
+    wlr_scene_tree* tiled_tree    = nullptr;
+    wlr_scene_tree* floating_tree = nullptr;
+
     std::list<std::unique_ptr<Output>>       outputs;
     std::list<std::unique_ptr<View>>         views;
     std::list<std::unique_ptr<LayerSurface>> layer_surfaces;

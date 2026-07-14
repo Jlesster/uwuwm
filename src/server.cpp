@@ -317,6 +317,13 @@ bool Server::setup() {
     layer_tree[ZWLR_LAYER_SHELL_V1_LAYER_BOTTOM] =
         wlr_scene_tree_create(&scene->tree);
     window_tree = wlr_scene_tree_create(&scene->tree);
+    // See server.hpp's comment on these two fields -- creation order
+    // here is what makes floating_tree structurally topmost: a scene
+    // tree's children render in the order they were created (later ==
+    // higher), and neither of these two ever gets reparented relative
+    // to the other afterwards, only individual views moved between them.
+    tiled_tree    = wlr_scene_tree_create(window_tree);
+    floating_tree = wlr_scene_tree_create(window_tree);
     layer_tree[ZWLR_LAYER_SHELL_V1_LAYER_TOP] =
         wlr_scene_tree_create(&scene->tree);
     layer_tree[ZWLR_LAYER_SHELL_V1_LAYER_OVERLAY] =

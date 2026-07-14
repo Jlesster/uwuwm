@@ -52,7 +52,17 @@ View::~View() {
 }
 
 void View::applyBoxToScene(const wlr_box& box) {
-    int b = server.lua_cfg.settings.border_px;
+    // Fullscreen views are placed at output->layout_box (see
+    // View::setFullscreen) and must cover it exactly -- border_tree is
+    // disabled for them, but until this guard existed the border inset
+    // below was still applied to content_tree's offset/clip regardless,
+    // leaving a border_px-wide gap of bare scene background (black) on
+    // every edge instead of true edge-to-edge fullscreen. A handful of
+    // pixels off from the real output resolution is also exactly the
+    // kind of mismatch that makes an exclusive-fullscreen game's own
+    // swapchain presentation come up black instead of just looking
+    // slightly off, rather than a cosmetic-only issue.
+    int b = is_fullscreen ? 0 : server.lua_cfg.settings.border_px;
     wlr_scene_node_set_position(&scene_tree->node, box.x, box.y);
     // Position content_tree flush against the inside of the border. Both
     // XdgToplevel and XWaylandView give us a real subsurface tree (the
@@ -129,6 +139,21 @@ void View::setGeometry(const wlr_box& box) {
     applyBoxToScene(box);
 }
 
+void View::updateZOrder() {
+    wlr_scene_tree* target = (is_floating || is_fullscreen)
+                                 ? server.floating_tree
+                                 : server.tiled_tree;
+    if(scene_tree->node.parent != target) {
+        wlr_scene_node_reparent(&scene_tree->node, target);
+    }
+    // Always explicit rather than relying on reparent's own placement
+    // within the new parent's children -- this is what actually
+    // guarantees the view lands above any sibling already in `target`
+    // (e.g. a window going fullscreen while another floating window is
+    // already up).
+    wlr_scene_node_raise_to_top(&scene_tree->node);
+}
+
 wlr_box View::centeredFloatBox(int content_w, int content_h) const {
     wlr_box box{};
     if(!output) { return box; }
@@ -147,6 +172,7 @@ wlr_box View::centeredFloatBox(int content_w, int content_h) const {
 void View::setFloating(bool floating) {
     if(is_fullscreen || floating == is_floating) { return; }
     is_floating = floating;
+    updateZOrder();
 
     if(!floating) {
         if(output) { layout::arrange(*output); }
@@ -156,16 +182,24 @@ void View::setFloating(bool floating) {
     if(!output) { return; }
 
     // Use the view's current (pre-float, tiled) content size as the
-    // basis for the centered box -- same size, just centered and
-    // detached from the tiling grid, rather than snapping to the
-    // 480x360 default every time something already has a real size.
+    // basis for the centered box, same as before, but scaled down by
+    // float_size_ratio -- popping a window out of the tiled grid should
+    // read as detaching a small utility window, not just unpinning the
+    // same half-of-screen (or more) tile it already had. A dialog that
+    // was already floating at map time skips this path entirely (it
+    // goes through XdgToplevel::handleMap/XWaylandView::handleMap
+    // instead, which centers it at its own natural size, no shrinking).
     int border_px = server.lua_cfg.settings.border_px;
     int content_w = geo.width > 2 * border_px ? geo.width - 2 * border_px : 0;
     int content_h = geo.height > 2 * border_px ? geo.height - 2 * border_px : 0;
+    float ratio   = server.lua_cfg.settings.float_size_ratio;
+    content_w     = std::max(1, static_cast<int>(content_w * ratio));
+    content_h     = std::max(1, static_cast<int>(content_h * ratio));
 
     wlr_box box  = centeredFloatBox(content_w, content_h);
     floating_geo = box;
     setGeometry(box);
+    playFloatPopAnimation();
 
     // This view just left the tiled set -- the remaining tiled siblings
     // are still sized/positioned for a layout that included it (they
@@ -206,12 +240,12 @@ void View::setFullscreen(bool fullscreen) {
     // against, just reached from a different call path.
     if(!output) { return; }
     setFullscreenBackend(fullscreen);
+    updateZOrder();
 
     if(fullscreen) {
         floating_geo = geo;
         setGeometry(output->layout_box);
         wlr_scene_node_set_enabled(&border_tree->node, false);
-        wlr_scene_node_raise_to_top(&scene_tree->node);
     } else {
         wlr_scene_node_set_enabled(&border_tree->node, true);
         if(is_floating) {
@@ -459,7 +493,8 @@ void View::setOpacity(float alpha, bool focused) {
         wlr_scene_node_for_each_buffer(
             &content_tree->node,
             [](wlr_scene_buffer* buffer, int /*sx*/, int /*sy*/, void* data) {
-                wlr_scene_buffer_set_opacity(buffer, *static_cast<float*>(data));
+                wlr_scene_buffer_set_opacity(buffer,
+                                             *static_cast<float*>(data));
             },
             &alpha);
     }
@@ -490,6 +525,26 @@ void View::playOpenAnimation() {
     wlr_box from = geo;
     from.y += server.lua_cfg.settings.anim_slide_px;
     startAnim(from, geo, 0.0f, 1.0f, AnimEnd::None);
+}
+
+void View::playFloatPopAnimation() {
+    if(!server.lua_cfg.settings.anim_enabled) { return; }
+    wlr_box to = geo;
+
+    float scale =
+        std::clamp(server.lua_cfg.settings.anim_pop_scale, 0.1f, 1.0f);
+    wlr_box from;
+    from.width  = std::max(1, static_cast<int>(to.width * scale));
+    from.height = std::max(1, static_cast<int>(to.height * scale));
+    // Centered on the same point `to` is centered on, so this reads as
+    // scaling up from the middle of the final box rather than sliding in
+    // from some other position on screen.
+    int cx = to.x + to.width / 2;
+    int cy = to.y + to.height / 2;
+    from.x = cx - from.width / 2;
+    from.y = cy - from.height / 2;
+
+    startAnim(from, to, 0.0f, 1.0f, AnimEnd::None);
 }
 
 void View::playCloseAnimation() {

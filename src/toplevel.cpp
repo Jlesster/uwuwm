@@ -23,7 +23,11 @@ XdgToplevel::XdgToplevel(Server& server, wlr_xdg_toplevel* xdg_toplevel)
 
     int border_px = server.lua_cfg.settings.border_px;
 
-    scene_tree            = wlr_scene_tree_create(server.window_tree);
+    // Parented under tiled_tree for now -- handleMap determines
+    // is_floating and calls updateZOrder() to reparent into
+    // floating_tree if needed, once that's known. See server.hpp's
+    // comment on tiled_tree/floating_tree.
+    scene_tree            = wlr_scene_tree_create(server.tiled_tree);
     scene_tree->node.data = this;
 
     border_tree = wlr_scene_tree_create(scene_tree);
@@ -93,6 +97,7 @@ void XdgToplevel::handleMap() {
                       state.min_width == state.max_width &&
                       state.min_height == state.max_height;
     is_floating     = xdg_toplevel->parent != nullptr || fixed_size;
+    updateZOrder();
 
     wlr_log(WLR_DEBUG,
             "[uwuwm xdg] handleMap title='%s' parent=%p min=%dx%d "
@@ -136,7 +141,11 @@ void XdgToplevel::handleMap() {
 
     createForeignToplevel();
     server.focusView(this);
-    playOpenAnimation();
+    if(is_floating && !is_fullscreen) {
+        playFloatPopAnimation();
+    } else {
+        playOpenAnimation();
+    }
 
     // A newly-mapped surface might be the one an existing
     // zwp_idle_inhibitor_v1 was created against before it ever mapped
@@ -358,7 +367,13 @@ void XdgToplevel::handleCommit(wlr_surface* /*surface*/) {
 }
 
 void XdgToplevel::configureBackend(const wlr_box& box) {
-    int b = server.lua_cfg.settings.border_px;
+    // See View::applyBoxToScene: a fullscreen toplevel must be asked to
+    // render at exactly output->layout_box, not that box minus 2*border_px
+    // -- requesting a size a few pixels short of the real output
+    // resolution is precisely the kind of mismatch that makes an
+    // exclusive-fullscreen game's swapchain presentation come up black
+    // instead of gracefully filling the tile the way a normal window does.
+    int b = is_fullscreen ? 0 : server.lua_cfg.settings.border_px;
     // wlr_xdg_toplevel_set_size requests a CONTENT size -- no shadow
     // compensation needed here. Proven by log, not assumed: requesting
     // 1900 (raw, before content_offset was even known) got back
@@ -455,9 +470,11 @@ void XdgToplevel::activateBackend(bool activated) {
 // first set_window_geometry call.
 wlr_box XdgToplevel::contentClipBox(const wlr_box& box) const {
     const wlr_box& g = xdg_toplevel->base->geometry;
-    int            b = server.lua_cfg.settings.border_px;
-    int            w = box.width - 2 * b;
-    int            h = box.height - 2 * b;
+    // See configureBackend/View::applyBoxToScene -- keep the clip in
+    // agreement with the size we actually requested from the client.
+    int b = is_fullscreen ? 0 : server.lua_cfg.settings.border_px;
+    int w = box.width - 2 * b;
+    int h = box.height - 2 * b;
 
     // Mirror configureBackend's min-size floor: if the tile is narrower
     // than the client's declared xdg_toplevel min_width/min_height, we
