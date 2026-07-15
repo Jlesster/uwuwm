@@ -1,5 +1,7 @@
 #include "server.hpp"
 
+#include "bar.hpp"
+
 extern "C" {
 #include <wlr/types/wlr_content_type_v1.h>
 #include <wlr/types/wlr_cursor_shape_v1.h>

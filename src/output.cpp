@@ -7,6 +7,7 @@ extern "C" {
 #include <wlr/util/log.h>
 }
 
+#include "bar.hpp"
 #include "dwindle.hpp"
 #include "idle.hpp"
 #include "layershell.hpp"
@@ -258,6 +259,17 @@ Output::~Output() {
     // rather than leaning on the same "harmless stale node" precedent,
     // since here "stale" means "still holding megabytes of pixels".
     clearWallpaperNodes(*this);
+
+    // Same "explicit release, not a harmless stale node" treatment as
+    // wallpaper above -- a Bar's scene node holds a real pixel buffer
+    // too, and detachFromOutput() also nulls the Bar's own `output`
+    // pointer so every draw primitive on it becomes a safe no-op instead
+    // of touching this Output after it's gone. The Bar objects
+    // themselves outlive this loop (Server::bars owns them, not this
+    // Output) -- only their attachment to *this* output is torn down
+    // here, same as an unplugged monitor's windows don't get destroyed,
+    // just detached/refocused elsewhere.
+    for(Bar* bar : bars) { bar->detachFromOutput(); }
 
     // Unlike background_rect (never explicitly destroyed -- it lives
     // under a shared layer_tree that outlives any one Output, and letting

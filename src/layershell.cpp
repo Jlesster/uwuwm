@@ -5,6 +5,7 @@ extern "C" {
 #include <wlr/util/log.h>
 }
 
+#include "bar.hpp"
 #include "layout.hpp"
 #include "output.hpp"
 #include "popup.hpp"
@@ -108,6 +109,29 @@ void LayerSurface::handleOutputDestroy() { output = nullptr; }
 void arrangeLayers(Output& output) {
     wlr_box full   = output.layout_box;
     wlr_box usable = full;
+
+    // Native uwu.bar.create()'d bars (bar.hpp) claim their space first,
+    // flush against the true output edge -- before any layer-shell
+    // client's exclusive zone below gets to stack outward from what's
+    // left. Matches a `top`-layer bar (waybar's own default) being the
+    // outermost thing on its edge in practice; a native bar and a
+    // client layer-shell bar on the same edge still stack correctly
+    // either way, it's specifically "which one sits flush against the
+    // screen edge" that this ordering decides. reposition() doesn't
+    // depend on `usable` (a bar always spans the full output width at
+    // its own edge, not whatever's left after other exclusive zones),
+    // so calling it here regardless of what shrinks `usable` next is
+    // safe.
+    for(Bar* bar : output.bars) {
+        if(bar->height <= 0) { continue; }
+        if(bar->position == BarPosition::Top) {
+            usable.y += bar->height;
+            usable.height -= bar->height;
+        } else {
+            usable.height -= bar->height;
+        }
+        bar->reposition();
+    }
 
     // Exclusive-zone accounting, bottom layer up to overlay, same order
     // dwl/sway process it in: each surface that reserves space shrinks

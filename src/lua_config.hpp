@@ -4,9 +4,9 @@ extern "C" {
 struct lua_State;
 }
 
-#include "wallpaper.hpp"
-
 #include <wayland-server-core.h>
+
+#include "wallpaper.hpp"
 
 #include <cstdint>
 #include <map>
@@ -250,8 +250,8 @@ struct LuaHook {
 // hooks/hooks_id are, but holds unique_ptr<LuaTimer> instead of LuaTimer
 // by value for exactly that reason.
 struct LuaTimer {
-    LuaConfig*       config = nullptr;
-    wl_event_source* source = nullptr;
+    LuaConfig*        config = nullptr;
+    wl_event_source*  source = nullptr;
     // -2 is LUA_NOREF -- spelled out rather than pulling in <lua.h> for
     // one constant, matching this header's existing forward-declare-only
     // treatment of lua_State above.
@@ -263,7 +263,7 @@ struct LuaTimer {
     // independently given for set_timeout) is passed straight to
     // addTimer(), not stored here -- see its doc comment.
     int interval_ms = 0;
-    int id          = 0;
+    int id           = 0;
 
     ~LuaTimer() {
         if(source) { wl_event_source_remove(source); }
@@ -308,6 +308,14 @@ public:
     // be under the cursor at press time, so the closure needs a handle to
     // it (typically to call client:begin_move()/:begin_resize()).
     void invokeWithClient(int fn_ref, View* view);
+
+    // Same again, but for uwu.bar.on_click(fn)'s fn(x, y, button) --
+    // three plain integers, no userdata to build, so this doesn't need
+    // its own pushClient()-style helper. Called from input.cpp's bar
+    // hit-test in the cursor_button handler, before (and instead of)
+    // the ordinary desktopViewAt()/mousebind/focus path runs -- a bar
+    // isn't a View or a wl_surface, so none of that applies to it.
+    void invokeBarClick(int fn_ref, int x, int y, uint32_t button);
 
     // Fully reloads rc.lua from scratch: clears keybinds/monitor_rules,
     // resets settings back to RuntimeConfig{} defaults, closes the
@@ -378,7 +386,7 @@ public:
     // see LuaTimer's own comment for why this is unique_ptr-keyed rather
     // than a flat vector like hooks.
     std::unordered_map<int, std::unique_ptr<LuaTimer>> timers;
-    int                                                next_timer_id = 1;
+    int                                                 next_timer_id = 1;
 
     // Registers a timer that calls fn_ref (already luaL_ref'd by the
     // caller -- l_timer_set_interval/set_timeout in lua_config.cpp) first

@@ -93,6 +93,14 @@ struct Output {
     // per-output, not just render order.
     std::list<struct LayerSurface*> layers[4];
 
+    // Native uwu.bar.create()'d bars anchored to this output (bar.hpp) --
+    // non-owning, same as `layers` above; Server::bars is the owner.
+    // arrangeLayers() (layershell.cpp) folds these into usable_box the
+    // same way it already does client layer-shell exclusive zones, so a
+    // native bar and a waybar-style client bar reserve space identically
+    // and stack correctly if both are present on the same edge.
+    std::vector<struct Bar*> bars;
+
     // Animated tag/workspace switch: enables both the outgoing and
     // incoming tagset's views simultaneously and slides them past each
     // other (View::playSlideOut/playSlideIn), landing on the normal

@@ -18,6 +18,7 @@ extern "C" {
 #include <wlr/util/log.h>
 }
 
+#include "bar.hpp"
 #include "lua_config.hpp"
 #include "output.hpp"
 #include "server.hpp"
@@ -80,6 +81,32 @@ View* desktopViewAt(Server&       server,
         if(t->scene_tree == tree) { return t.get(); }
     }
     return nullptr;
+}
+
+// Hit-tests for a native uwu.bar.create()'d bar at layout coordinates
+// (lx, ly). Unlike desktopViewAt above, a Bar's scene node isn't wrapped
+// in its own tree to walk -- Bar::reposition() tags the buffer node's
+// own .data directly with the Bar* -- so this is a flat hit-test with no
+// tree-walk. wlr_scene_surface_try_from_buffer succeeding means the hit
+// node is a real client surface (a View or a layer-shell surface), never
+// a Bar (Bar's buffer is a raw custom wlr_buffer wrapping software-
+// rendered pixels, not backed by any wl_surface), so that check alone is
+// enough to rule those out before trusting node->data as a Bar*. On a
+// hit, fills `local_x`/`local_y` with coordinates relative to the bar's
+// own top-left corner -- what a uwu.bar.on_click() callback receives.
+Bar* barAt(Server& server, double lx, double ly, int* local_x, int* local_y) {
+    double          sx = 0, sy = 0;
+    wlr_scene_node* node =
+        wlr_scene_node_at(&server.scene->tree.node, lx, ly, &sx, &sy);
+    if(!node || node->type != WLR_SCENE_NODE_BUFFER) { return nullptr; }
+
+    wlr_scene_buffer* scene_buffer = wlr_scene_buffer_from_node(node);
+    if(wlr_scene_surface_try_from_buffer(scene_buffer)) { return nullptr; }
+    if(!node->data) { return nullptr; }
+
+    *local_x = static_cast<int>(sx);
+    *local_y = static_cast<int>(sy);
+    return static_cast<Bar*>(node->data);
 }
 
 // Finds the View wrapping a given wlr_surface, or nullptr if it isn't one
@@ -658,6 +685,30 @@ void setupCursor(Server& server) {
                 }
                 wlr_seat_pointer_notify_button(
                     server.seat, event->time_msec, event->button, event->state);
+                return;
+            }
+
+            // A native bar (uwu.bar.create()) isn't a View or a
+            // wl_surface -- there's no client for the seat to route a
+            // button event to, so this has to be checked and fully
+            // consumed here, before desktopViewAt/mousebind/
+            // wlr_seat_pointer_notify_button below, all of which assume
+            // a real surface exists under the cursor (a layer-shell
+            // surface click still reaches its client through the seat's
+            // already-established pointer focus from motion handling --
+            // a bar has no such focus to route through). No fallback to
+            // a mousebind or the client under the bar on a bar with no
+            // uwu.bar.on_click() set (click_fn_ref == -2, LUA_NOREF) --
+            // the click is still consumed, not passed through, since
+            // whatever's tiled/floating underneath a bar is specifically
+            // *not* what the cursor visually appears to be over.
+            int bar_x = 0, bar_y = 0;
+            if(Bar* bar = barAt(
+                   server, server.cursor->x, server.cursor->y, &bar_x, &bar_y)) {
+                if(bar->click_fn_ref != -2) {
+                    server.lua_cfg.invokeBarClick(
+                        bar->click_fn_ref, bar_x, bar_y, event->button);
+                }
                 return;
             }
 

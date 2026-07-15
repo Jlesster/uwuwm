@@ -23,16 +23,19 @@ extern "C" {
 
 #include "listener.hpp"
 #include "lua_config.hpp"
+#include "text.hpp"
 
 #include <cstdint>
 #include <list>
 #include <memory>
 #include <string>
+#include <unordered_map>
 
 struct Output;
 struct View;
 struct Popup;
 struct LayerSurface;
+struct Bar;
 struct Keyboard;
 struct InputDevice;
 struct wlr_layer_shell_v1;
@@ -86,6 +89,11 @@ public:
     }
 
     LuaConfig lua_cfg;
+
+    // Shared by every Bar (bar.hpp) -- see text.hpp's own comment for why
+    // the font/glyph caches inside it are keyed globally rather than
+    // per-bar.
+    TextRenderer text_renderer;
 
     wl_display*                  display              = nullptr;
     wlr_backend*                 backend              = nullptr;
@@ -233,6 +241,17 @@ public:
     std::list<std::unique_ptr<View>>         views;
     std::list<std::unique_ptr<LayerSurface>> layer_surfaces;
     std::list<std::unique_ptr<Keyboard>>     keyboards;
+
+    // uwu.bar.create()'s -- see bar.hpp. Unlike LuaConfig::hooks/timers,
+    // NOT cleared or torn down on a reload -- a bar is a live
+    // compositor-drawn scene object with its own screen real estate
+    // (Output::bars' exclusive-zone reservation depends on it staying
+    // put), not config/rule state; ripping it out from under rc.lua just
+    // because rc.lua changed would be a worse surprise than leaving it
+    // running until uwu.bar.destroy() explicitly says otherwise -- the
+    // same reasoning already-mapped client windows get.
+    std::unordered_map<int, std::unique_ptr<Bar>> bars;
+    int                                            next_bar_id = 1;
 
     // Handed out sequentially to View::id at construction (see
     // view.hpp) -- never reused within one run, so an IPC client

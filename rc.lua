@@ -592,3 +592,81 @@ end)
 --
 -- Keybind this to mod+shift+s for "tidy slack back onto the laptop
 -- panel" if you tend to drag it onto an external display by accident.
+
+-- ── Status bar ───────────────────────────────────────────────────────
+-- uwu.bar.create() -- a native, compositor-drawn status bar (no
+-- swaybg-style external process; see uwu.bar in lib/meta/uwu.lua for
+-- the full method list). This is the raw-primitives version -- draw
+-- calls, a redraw function, a timer -- not a widget-composition layer
+-- like AwesomeWM's wibox; there's no paw.bar/nyaa.bar yet, this is
+-- straight uwu.bar.* plus a couple dozen lines of Lua.
+--
+-- Adjust FONT to whatever's actually installed -- uwu.bar doesn't look
+-- up fonts by name, only by path (see Bar:text()'s own doc comment).
+local FONT = '/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf'
+local pal = nyaa.palette('catppuccin_mocha')
+
+-- "#rrggbb" -> 0xRRGGBBAA integer (uwu.bar's color format), alpha fixed
+-- at full opacity -- every nyaa.palette() role is already an opaque hex
+-- string, nothing here ever needs a translucent draw.
+local function hex(h)
+  return tonumber(h:sub(2), 16) * 256 + 0xff
+end
+
+local bar = uwu.bar.create({ position = 'top', height = 28 })
+
+local function redraw_bar()
+  bar:clear(hex(pal.mantle))
+
+  -- Tag indicator: one 20px square per tag, active tag(s) on the
+  -- *focused* monitor highlighted in mauve. uwu.tag.view() (below, in
+  -- on_click) only ever targets the focused output too, so this
+  -- intentionally tracks the same one rather than whichever output the
+  -- bar itself happens to be on -- on a multi-monitor setup with a bar
+  -- per output, every bar ends up showing/driving the same (focused)
+  -- output's tags, which is a real limitation worth knowing about
+  -- rather than a bug: there's no per-output tag click-through here.
+  local focused_tagset = 0
+  for _, m in ipairs(uwu.monitor.list()) do
+    if m.focused then
+      focused_tagset = m.tagset
+      break
+    end
+  end
+  for i = 1, uwu.tag_count do
+    local x = 4 + (i - 1) * 24
+    local active = (focused_tagset & (1 << (i - 1))) ~= 0
+    bar:rect(x, 4, 20, 20, active and hex(pal.mauve) or hex(pal.surface0))
+    bar:text(
+      x + 6,
+      18,
+      tostring(i),
+      FONT,
+      12,
+      active and hex(pal.base) or hex(pal.subtext0)
+    )
+  end
+
+  -- Clock, right-aligned -- text_width() first since :text() itself
+  -- only ever draws left-to-right from the x you give it.
+  local clock = os.date('%H:%M:%S')
+  local w = bar:text_width(clock, FONT, 14)
+  bar:text(bar:width() - w - 10, 19, clock, FONT, 14, hex(pal.text))
+
+  bar:commit()
+end
+
+-- Tag squares are a fixed 24px pitch starting at x=4 (see redraw_bar
+-- above) -- inverting that back to a tag number here rather than
+-- tracking hit-rects separately for ten squares.
+bar:on_click(function(x, _, _)
+  local tag = math.floor((x - 4) / 24) + 1
+  if tag >= 1 and tag <= uwu.tag_count then
+    uwu.tag.view(tag)
+  end
+end)
+
+redraw_bar()
+uwu.timer.set_interval(1, redraw_bar) -- clock tick
+paw.on('tags_changed', redraw_bar) -- instant update on tag switch,
+-- not up to a second stale

@@ -513,3 +513,126 @@ function uwu.system.volume.mute(mute) end
 
 ---Toggles mute on the default sink.
 function uwu.system.volume.toggle_mute() end
+
+-- ── timer ────────────────────────────────────────────────────────────
+
+---@class uwu.timer
+uwu.timer = {}
+
+---Calls fn every `seconds` (fractional allowed), starting `seconds`
+---from now, until uwu.timer.cancel(id) or a reload. fn receives no
+---arguments. Cleared (not carried across) a reload, same as uwu.hook()
+----- register it again from rc.lua if you want it back.
+---@param seconds number
+---@param fn fun()
+---@return integer id
+function uwu.timer.set_interval(seconds, fn) end
+
+---Calls fn exactly once, `seconds` from now, then removes itself.
+---@param seconds number
+---@param fn fun()
+---@return integer id
+function uwu.timer.set_timeout(seconds, fn) end
+
+---Cancels a set_interval before its next tick, or a set_timeout before
+---it ever fires. No-op on an unknown/already-fired/already-cancelled id.
+---@param id integer
+function uwu.timer.cancel(id) end
+
+-- ── bar ──────────────────────────────────────────────────────────────
+
+---@class uwu.bar
+uwu.bar = {}
+
+---@class uwu.BarCreateOpts
+---@field output? string  Output name; defaults to the currently focused one.
+---@field position? "top"|"bottom"  Defaults to "top".
+---@field height? integer  Pixels; defaults to 30.
+
+---Creates a native, compositor-drawn status bar -- not a Wayland
+---client, no external process. Immediately reserves its own
+---exclusive-zone strip of screen (same mechanism a layer-shell bar like
+---waybar uses), so tiled windows on that output shrink to make room
+---right away. Draw into it with the Bar methods below, then :commit()
+---to push what you've drawn on screen -- nothing changes until commit()
+---is called. Survives a uwu.reload() (unlike a hook or timer) -- only
+---:destroy() removes it.
+---@param opts uwu.BarCreateOpts
+---@return uwu.Bar
+function uwu.bar.create(opts) end
+
+---@class uwu.Bar
+local Bar = {}
+
+---Fills the entire bar with one color -- 0xRRGGBBAA, straight alpha.
+---Bars are always opaque once drawn: a color's own alpha blends into
+---whatever's already there, it doesn't punch a transparent hole.
+---@param color integer
+function Bar:clear(color) end
+
+---Fills an (x, y, w, h) rectangle with `color` (0xRRGGBBAA). Clipped to
+---the bar's own bounds -- an out-of-range rect is silently trimmed, not
+---an error.
+---@param x integer
+---@param y integer
+---@param w integer
+---@param h integer
+---@param color integer
+function Bar:rect(x, y, w, h, color) end
+
+---Draws `text` with its baseline at (x, y) -- not the top of the glyph
+---box; see Bar:line_height() for vertical-centering math. `font_path`
+---is a path to a .ttf/.otf/.ttc file (no bundled/system font lookup by
+---name -- point at one directly, e.g.
+---"/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf"). Returns
+---the horizontal advance in pixels, for chaining more text after this
+---or right/center-aligning by measuring with Bar:text_width() first.
+---@param x integer
+---@param y integer
+---@param text string
+---@param font_path string
+---@param pixel_size integer
+---@param color integer
+---@return integer advance_px
+function Bar:text(x, y, text, font_path, pixel_size, color) end
+
+---Same shaping pass as Bar:text(), without drawing anything -- just the
+---width, for alignment math.
+---@param text string
+---@param font_path string
+---@param pixel_size integer
+---@return integer width_px
+function Bar:text_width(text, font_path, pixel_size) end
+
+---Recommended line height for `font_path` at `pixel_size` -- lets you
+---vertically center a label in a bar of known height without a
+---hand-picked fudge factor.
+---@param font_path string
+---@param pixel_size integer
+---@return integer height_px
+function Bar:line_height(font_path, pixel_size) end
+
+---Uploads everything drawn since the last commit() to the screen.
+---Nothing you draw is visible before this is called.
+function Bar:commit() end
+
+---Registers a click handler -- fn(x, y, button), x/y relative to this
+---bar's own top-left corner, button a BTN_LEFT/BTN_RIGHT/... evdev
+---code. Replaces any previously-registered handler. With no handler
+---set, a click on the bar is still consumed (not passed through to
+---whatever's tiled underneath), it just does nothing.
+---@param fn fun(x: integer, y: integer, button: integer)
+function Bar:on_click(fn) end
+
+---This bar's current pixel width (tracks its output's width).
+---@return integer
+function Bar:width() end
+
+---This bar's height, as given to uwu.bar.create() (or the 30px default).
+---@return integer
+function Bar:height() end
+
+---Destroys this bar: releases its exclusive-zone reservation (tiled
+---windows on that output re-expand into the freed space) and removes
+---it from the screen. The Bar handle is invalid after this.
+function Bar:destroy() end

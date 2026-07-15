@@ -22,9 +22,11 @@ extern "C" {
 }
 
 #include "config.hpp"
+#include "bar.hpp"
 #include "dwindle.hpp"
 #include "input.hpp"
 #include "ipc.hpp"
+#include "layershell.hpp"
 #include "layout.hpp"
 #include "output.hpp"
 #include "server.hpp"
@@ -1906,6 +1908,235 @@ const luaL_Reg kMonitorFuncs[] = {
 
 // uwu.wallpaper.set(name, { path = "...", mode = "fill" }). `name` is a
 // wlr_output name ("DP-1", "eDP-1", ...) or the wildcard "*" -- same
+// ----------------------------------------------------------------------------
+// uwu.bar.* -- the native status bar (bar.hpp/bar.cpp)
+// ----------------------------------------------------------------------------
+
+constexpr const char* kBarMeta = "uwu.Bar";
+
+struct LuaBar {
+    int id;
+};
+
+// Bar's own id -> unique_ptr<Bar> map (Server::bars) is the single
+// source of truth for whether a bar is still alive -- keyed lookup by id
+// rather than View's "scan a list for this raw pointer" (checkClient)
+// specifically because a Bar's id, unlike a View*, has nothing else that
+// could coincidentally reuse the same value after destruction to worry
+// about.
+Bar* checkBar(lua_State* L, int idx) {
+    auto*   b      = static_cast<LuaBar*>(luaL_checkudata(L, idx, kBarMeta));
+    Server* server = getServer(L);
+    auto    it     = server->bars.find(b->id);
+    if(it == server->bars.end()) {
+        luaL_error(L, "uwu.bar: stale bar reference (already destroyed)");
+    }
+    return it->second.get();
+}
+
+void pushBar(lua_State* L, int id) {
+    auto* b = static_cast<LuaBar*>(lua_newuserdata(L, sizeof(LuaBar)));
+    b->id   = id;
+    luaL_getmetatable(L, kBarMeta);
+    lua_setmetatable(L, -2);
+}
+
+// uwu.bar.create({output=, position="top"/"bottom", height=}) -> Bar.
+// `output` defaults to the currently focused one; `position` defaults
+// to "top"; `height` defaults to 30px. Every field is a plain
+// uwu.set()-style value, not a nested rule table -- a bar is a single
+// concrete thing you're creating right now, not a pattern matched
+// against clients that come and go later the way uwu.rule() is.
+int l_bar_create(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    Server* server = getServer(L);
+
+    std::string output_name;
+    bool        has_output = false;
+    getOptionalField(L, 1, "output", output_name, has_output);
+
+    std::string position_str = "top";
+    bool        has_position = false;
+    getOptionalField(L, 1, "position", position_str, has_position);
+    BarPosition position =
+        (position_str == "bottom") ? BarPosition::Bottom : BarPosition::Top;
+
+    double height_d    = 30;
+    bool   has_height  = false;
+    getOptionalField(L, 1, "height", height_d, has_height);
+    int height = static_cast<int>(height_d);
+
+    Output* target = nullptr;
+    if(has_output) {
+        for(auto& out : server->outputs) {
+            if(output_name == out->wlr_output->name) {
+                target = out.get();
+                break;
+            }
+        }
+        if(!target) {
+            luaL_error(
+                L, "uwu.bar.create: no such output '%s'", output_name.c_str());
+            return 0;
+        }
+    } else {
+        target = server->focused_output;
+        if(!target && !server->outputs.empty()) {
+            target = server->outputs.front().get();
+        }
+    }
+    if(!target) {
+        luaL_error(L, "uwu.bar.create: no output to attach to yet");
+        return 0;
+    }
+
+    auto bar = std::make_unique<Bar>(*server, *target, position, height);
+    int  id  = server->next_bar_id++;
+    bar->id  = id;
+    target->bars.push_back(bar.get());
+    server->bars.emplace(id, std::move(bar));
+
+    // Claims this bar's exclusive zone immediately -- the same
+    // re-sweep-right-away treatment l_wallpaper_set gives "*" wallpaper
+    // rules below, for the same reason: waiting for the next reload to
+    // reserve space a bar that already exists is visibly wrong, not
+    // just a stale-cache inconvenience.
+    arrangeLayers(*target);
+
+    pushBar(L, id);
+    return 1;
+}
+
+int l_bar_destroy(lua_State* L) {
+    Bar*    bar    = checkBar(L, 1);
+    int     id     = bar->id;
+    Output* output = bar->output;
+    if(bar->click_fn_ref != -2) {
+        luaL_unref(L, LUA_REGISTRYINDEX, bar->click_fn_ref);
+    }
+    getServer(L)->bars.erase(id);  // ~Bar() detaches from output->bars itself
+    if(output) { arrangeLayers(*output); }  // release its exclusive zone
+    return 0;
+}
+
+int l_bar_clear(lua_State* L) {
+    Bar*     bar   = checkBar(L, 1);
+    uint32_t color = static_cast<uint32_t>(luaL_checkinteger(L, 2));
+    bar->clear(color);
+    return 0;
+}
+
+int l_bar_rect(lua_State* L) {
+    Bar* bar = checkBar(L, 1);
+    int  x   = static_cast<int>(luaL_checkinteger(L, 2));
+    int  y   = static_cast<int>(luaL_checkinteger(L, 3));
+    int  w   = static_cast<int>(luaL_checkinteger(L, 4));
+    int  h   = static_cast<int>(luaL_checkinteger(L, 5));
+    uint32_t color = static_cast<uint32_t>(luaL_checkinteger(L, 6));
+    bar->fillRect(x, y, w, h, color);
+    return 0;
+}
+
+// bar:text(x, y, str, font_path, pixel_size, color) -> advance_px. Pen
+// position (x, y) is the text *baseline*, same convention text.hpp's
+// TextRenderer::drawText uses -- y is where the bottom of a flat letter
+// like "x" sits, not the top of the glyph box; a caller centering a
+// label in a bar of known height wants bar:line_height() for that math,
+// not this call's own return value (which is horizontal advance only).
+int l_bar_text(lua_State* L) {
+    Bar*        bar   = checkBar(L, 1);
+    int         x     = static_cast<int>(luaL_checkinteger(L, 2));
+    int         y     = static_cast<int>(luaL_checkinteger(L, 3));
+    const char* utf8  = luaL_checkstring(L, 4);
+    const char* font  = luaL_checkstring(L, 5);
+    int         size  = static_cast<int>(luaL_checkinteger(L, 6));
+    uint32_t    color = static_cast<uint32_t>(luaL_checkinteger(L, 7));
+    lua_pushinteger(L, bar->drawText(x, y, utf8, font, size, color));
+    return 1;
+}
+
+int l_bar_text_width(lua_State* L) {
+    Bar*        bar  = checkBar(L, 1);
+    const char* utf8 = luaL_checkstring(L, 2);
+    const char* font = luaL_checkstring(L, 3);
+    int         size = static_cast<int>(luaL_checkinteger(L, 4));
+    lua_pushinteger(L, bar->textWidth(utf8, font, size));
+    return 1;
+}
+
+int l_bar_line_height(lua_State* L) {
+    Bar*        bar  = checkBar(L, 1);
+    const char* font = luaL_checkstring(L, 2);
+    int         size = static_cast<int>(luaL_checkinteger(L, 3));
+    lua_pushinteger(L, bar->lineHeight(font, size));
+    return 1;
+}
+
+int l_bar_commit(lua_State* L) {
+    checkBar(L, 1)->commit();
+    return 0;
+}
+
+// bar:on_click(fn) -- fn(x, y, button). Passing a new fn replaces
+// whatever was registered before (unref'd first, not leaked); there's
+// no uwu.bar.off_click() separate from this because a bar only ever
+// needs at most one click handler, unlike uwu.hook()'s many-listeners-
+// per-event model.
+int l_bar_on_click(lua_State* L) {
+    Bar* bar = checkBar(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if(bar->click_fn_ref != -2) {
+        luaL_unref(L, LUA_REGISTRYINDEX, bar->click_fn_ref);
+    }
+    lua_pushvalue(L, 2);
+    bar->click_fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    return 0;
+}
+
+int l_bar_width(lua_State* L) {
+    lua_pushinteger(L, checkBar(L, 1)->width);
+    return 1;
+}
+int l_bar_height(lua_State* L) {
+    lua_pushinteger(L, checkBar(L, 1)->height);
+    return 1;
+}
+
+const luaL_Reg kBarMethods[] = {
+    {"clear",       l_bar_clear      },
+    {"rect",        l_bar_rect       },
+    {"text",        l_bar_text       },
+    {"text_width",  l_bar_text_width },
+    {"line_height", l_bar_line_height},
+    {"commit",      l_bar_commit     },
+    {"on_click",    l_bar_on_click   },
+    {"destroy",     l_bar_destroy    },
+    {"width",       l_bar_width      },
+    {"height",      l_bar_height     },
+    {nullptr,       nullptr          },
+};
+
+const luaL_Reg kBarFuncs[] = {
+    {"create", l_bar_create},
+    {nullptr,  nullptr     },
+};
+
+// Pure-method userdata (no property-style uwu.bar.Client-esque
+// getters/setters needed) -- self-referencing metatable is the standard
+// idiom for that, so unlike registerClientMetatable this doesn't need
+// its own __index/__newindex C functions, just __methods folded
+// straight into __index.
+void registerBarMetatable(lua_State* L) {
+    luaL_newmetatable(L, kBarMeta);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, kBarMethods, 0);
+    lua_pop(L, 1);
+}
+
+
+// uwu.wallpaper.set(name, {path=, mode=}) -- name is an output name or
+// "*" for every output not otherwise matched by a more specific rule,
 // exact-name-wins-over-wildcard precedence as uwu.monitor.set, see
 // findWallpaperRule in wallpaper.cpp. `path` is required; `mode`
 // defaults to "fill" if omitted (one of fill/fit/stretch/center/tile --
@@ -2532,6 +2763,7 @@ void LuaConfig::init(Server& server) {
     // stashes it in the registry under kClientMeta, it doesn't need a
     // slot on `uwu` itself.
     registerClientMetatable(L);
+    registerBarMetatable(L);
 
     lua_newtable(L);
     luaL_setfuncs(L, kuwuwmFuncs, 0);
@@ -2557,6 +2789,10 @@ void LuaConfig::init(Server& server) {
     lua_newtable(L);
     luaL_setfuncs(L, kTimerFuncs, 0);
     lua_setfield(L, -2, "timer");
+
+    lua_newtable(L);
+    luaL_setfuncs(L, kBarFuncs, 0);
+    lua_setfield(L, -2, "bar");
 
     lua_newtable(L);
     luaL_setfuncs(L, kTagFuncs, 0);
@@ -2722,6 +2958,22 @@ void LuaConfig::invokeWithClient(int fn_ref, View* view) {
     }
 }
 
+void LuaConfig::invokeBarClick(int fn_ref, int x, int y, uint32_t button) {
+    lua_rawgeti(L, LUA_REGISTRYINDEX, fn_ref);
+    lua_pushinteger(L, x);
+    lua_pushinteger(L, y);
+    lua_pushinteger(L, static_cast<lua_Integer>(button));
+    guardedCall(3);
+
+    // Same deferred-reload treatment as invoke()/invokeWithClient() --
+    // see invoke()'s own comment for why this can't just reload inline.
+    if(reload_pending) {
+        wlr_log(WLR_INFO, "deferred reload requested from bar click callback");
+        reload_pending = false;
+        server_->reloadConfig();
+    }
+}
+
 void LuaConfig::fireClientEvent(const std::string& event, View* view) {
     // Copy the ids of hooks registered for this event *before* invoking
     // any of them -- a hook is free to call uwu.unhook() on itself or on
@@ -2811,11 +3063,6 @@ int timerTrampoline(void* data) {
     if(interval_ms > 0) {
         wl_event_source_timer_update(it->second->source, interval_ms);
     } else {
-        // One-shot -- drop the registry ref the way cancelTimer does,
-        // before the unique_ptr destruction releases the event source.
-        // Without this, every fired set_timeout leaks one ref slot in
-        // the Lua registry for the lifetime of the current `L`.
-        luaL_unref(config->L, LUA_REGISTRYINDEX, it->second->fn_ref);
         config->timers.erase(it);
     }
     return 0;
@@ -2823,12 +3070,12 @@ int timerTrampoline(void* data) {
 }  // namespace
 
 int LuaConfig::addTimer(int fn_ref, int delay_ms, int interval_ms) {
-    auto timer         = std::make_unique<LuaTimer>();
-    timer->config      = this;
-    timer->fn_ref      = fn_ref;
-    timer->interval_ms = interval_ms;
-    timer->id          = next_timer_id++;
-    int id             = timer->id;
+    auto timer          = std::make_unique<LuaTimer>();
+    timer->config       = this;
+    timer->fn_ref       = fn_ref;
+    timer->interval_ms  = interval_ms;
+    timer->id           = next_timer_id++;
+    int id              = timer->id;
 
     wl_event_loop* loop = wl_display_get_event_loop(server_->display);
     timer->source = wl_event_loop_add_timer(loop, timerTrampoline, timer.get());
@@ -2869,9 +3116,8 @@ bool LuaConfig::reload() {
     std::vector<LuaHook>       old_hooks           = std::move(hooks);
     std::unordered_map<int, std::unique_ptr<LuaTimer>> old_timers =
         std::move(timers);
-    RuntimeConfig old_settings         = settings;
-    int           old_next_hook_id     = next_hook_id;
-    int           old_next_timer_id    = next_timer_id;
+    RuntimeConfig old_settings     = settings;
+    int           old_next_hook_id = next_hook_id;
 
     keybinds.clear();
     mousebinds.clear();
@@ -2880,10 +3126,9 @@ bool LuaConfig::reload() {
     wallpaper_rules.clear();
     hooks.clear();
     timers.clear();
-    next_hook_id  = 1;
-    next_timer_id = 1;
-    settings      = RuntimeConfig{};
-    L             = nullptr;
+    next_hook_id = 1;
+    settings     = RuntimeConfig{};
+    L            = nullptr;
 
     init(*server_);
     bool ok = load();
@@ -2924,7 +3169,6 @@ bool LuaConfig::reload() {
         timers.clear();
         timers          = std::move(old_timers);
         next_hook_id    = old_next_hook_id;
-        next_timer_id   = old_next_timer_id;
         settings        = old_settings;
         wlr_log(WLR_ERROR,
                 "rc.lua reload failed, keeping previous config running");
