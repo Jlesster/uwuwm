@@ -76,17 +76,19 @@ harfbuzz_dep = dependency('harfbuzz')
 glib_dep = dependency('glib-2.0')
 
 # uwu.qml.* (qml_bar.cpp/qt_runtime.cpp) -- QtQuick's own scenegraph +
-# QML engine, rendered offscreen into an FBO and uploaded through the
-# same wlr_scene_buffer path Bar (bar.cpp) already uses. Plain
-# dependency() calls, not meson's qt6 module: nothing in this codebase
-# defines a Q_OBJECT-derived class of its own, so there's no moc step
-# to wire up -- only real Qt headers/libs are needed, matching the rest
-# of this file's plain pkg-config style.
-qt_core_dep  = dependency('Qt6Core')
-qt_gui_dep   = dependency('Qt6Gui')
-qt_qml_dep   = dependency('Qt6Qml')
+# QML engine, rendered offscreen via the QSG software backend
+# (QQuickWindow::grabWindow(), no GL/EGL -- see qt_runtime.cpp's
+# QT_QUICK_BACKEND comment) and uploaded through the same
+# wlr_scene_buffer path Bar (bar.cpp) already uses. Plain dependency()
+# calls, not meson's qt6 module: nothing in this codebase defines a
+# Q_OBJECT-derived class of its own, so there's no moc step to wire up
+# -- only real Qt headers/libs are needed, matching the rest of this
+# file's plain pkg-config style. No Qt6OpenGL dependency: this render
+# path never touches QOpenGLContext/QOffscreenSurface/FBOs.
+qt_core_dep = dependency('Qt6Core')
+qt_gui_dep = dependency('Qt6Gui')
+qt_qml_dep = dependency('Qt6Qml')
 qt_quick_dep = dependency('Qt6Quick')
-qt_opengl_dep = dependency('Qt6OpenGL')
 
 deps = [
     wlroots_dep,
@@ -103,7 +105,6 @@ deps = [
     qt_gui_dep,
     qt_qml_dep,
     qt_quick_dep,
-    qt_opengl_dep,
 ]
 
 # ── C++-incompatible wlroots headers ────────────────────────────────────

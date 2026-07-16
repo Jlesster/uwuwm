@@ -14,16 +14,11 @@ extern "C" {
 #include <QColor>
 #include <QFont>
 #include <QGuiApplication>
-#include <QOffscreenSurface>
-#include <QOpenGLContext>
-#include <QOpenGLFramebufferObject>
-#include <QOpenGLFunctions>
+#include <QImage>
 #include <QQmlComponent>
 #include <QQmlEngine>
-#include <QQuickGraphicsDevice>
 #include <QQuickItem>
 #include <QQuickRenderControl>
-#include <QQuickRenderTarget>
 #include <QQuickWindow>
 #include <algorithm>
 #include <cstring>
@@ -100,16 +95,18 @@ QColor colorFromPacked(uint32_t packed) {
 }  // namespace
 
 // ---------------------------------------------------------------------------
-// QmlBar::Impl -- every Qt object this bar owns. Mirrors the harness
-// proven out in the milestone-1/4 spikes exactly, including the one
-// real bug those spikes caught: commit() below uses glFinish(), not
-// glFlush() -- glFlush() only *queues* the render commands, it doesn't
-// guarantee they've completed before the following glReadPixels-based
-// toImage() call runs, which silently reads stale GPU state on
-// software (llvmpipe) rendering. Getting that wrong doesn't crash;
-// it just makes the bar occasionally show stale content, which is a
-// much worse bug to chase blind on real hardware than to fix once
-// here.
+// QmlBar::Impl -- every Qt object this bar owns.
+//
+// No QOpenGLContext/QOffscreenSurface/QOpenGLFramebufferObject here
+// (there used to be): this used to render into an FBO via a real GL
+// context, but on uwuwm's actual bare-TTY/DRM target "offscreen" QPA
+// cannot hand out a working GL context at all -- confirmed directly,
+// see qt_runtime.cpp's comment on QT_QUICK_BACKEND for the full story
+// and the black-screen-hang this was causing. QT_QUICK_BACKEND=
+// software (set there) makes QQuickRenderControl rasterize on the CPU
+// instead, so commit() below just calls QQuickWindow::grabWindow() for
+// a plain QImage -- no GL objects for this Impl to own or tear down at
+// all.
 // ---------------------------------------------------------------------------
 struct QmlBar::Impl {
     QQmlEngine* engine = nullptr;  // borrowed from QtRuntime, not owned
@@ -117,29 +114,16 @@ struct QmlBar::Impl {
     QQuickWindow*        quickWindow   = nullptr;
     QQuickItem*          root =
         nullptr;  // owned via Qt's item/QObject tree, not directly
-    QOpenGLContext*           glContext        = nullptr;
-    QOffscreenSurface*        offscreenSurface = nullptr;
-    QOpenGLFramebufferObject* fbo              = nullptr;
 
     std::unordered_map<int, QQuickItem*> widgets;
 
     int w = 0, h = 0;
 
     ~Impl() {
-        // Same teardown order Qt's own rendercontrol example uses:
-        // context has to be current for GL resource cleanup during
-        // window/renderControl/fbo destruction, then released after.
-        if(glContext && offscreenSurface) {
-            glContext->makeCurrent(offscreenSurface);
-        }
         delete quickWindow;  // cascades: destroys root and every rect/text
                              // child parented under it via Qt's item tree
         if(renderControl) { renderControl->invalidate(); }
         delete renderControl;
-        delete fbo;
-        if(glContext) { glContext->doneCurrent(); }
-        delete offscreenSurface;
-        delete glContext;
     }
 };
 
@@ -159,17 +143,6 @@ QmlBar::QmlBar(Server&     server_,
     impl->root = qobject_cast<QQuickItem*>(rootComponent.create());
     impl->root->setParentItem(impl->quickWindow->contentItem());
 
-    impl->glContext = new QOpenGLContext();
-    impl->glContext->setFormat(impl->quickWindow->requestedFormat());
-    impl->glContext->create();
-
-    impl->offscreenSurface = new QOffscreenSurface();
-    impl->offscreenSurface->setFormat(impl->glContext->format());
-    impl->offscreenSurface->create();
-    impl->glContext->makeCurrent(impl->offscreenSurface);
-
-    impl->quickWindow->setGraphicsDevice(
-        QQuickGraphicsDevice::fromOpenGLContext(impl->glContext));
     impl->renderControl->initialize();
 
     reposition();
@@ -199,16 +172,8 @@ void QmlBar::reposition() {
     if(width <= 0 || height <= 0) { return; }
 
     if(impl->w != width || impl->h != height) {
-        impl->glContext->makeCurrent(impl->offscreenSurface);
-        delete impl->fbo;
-        QOpenGLFramebufferObjectFormat fboFormat;
-        fboFormat.setAttachment(QOpenGLFramebufferObject::CombinedDepthStencil);
-        impl->fbo = new QOpenGLFramebufferObject(width, height, fboFormat);
         impl->quickWindow->setGeometry(0, 0, width, height);
         impl->root->setSize(QSizeF(width, height));
-        impl->quickWindow->setRenderTarget(
-            QQuickRenderTarget::fromOpenGLTexture(impl->fbo->texture(),
-                                                  impl->fbo->size()));
         impl->w = width;
         impl->h = height;
     }
@@ -297,17 +262,17 @@ void QmlBar::setSize(int widget_id, int w, int h) {
 void QmlBar::commit() {
     if(!output || !scene_node || width <= 0 || height <= 0) { return; }
 
-    impl->glContext->makeCurrent(impl->offscreenSurface);
     impl->renderControl->polishItems();
     impl->renderControl->beginFrame();
     impl->renderControl->sync();
     impl->renderControl->render();
     impl->renderControl->endFrame();
-    // glFinish(), not glFlush() -- see this file's Impl comment above.
-    impl->glContext->functions()->glFinish();
 
-    QImage image =
-        impl->fbo->toImage().convertToFormat(QImage::Format_RGBA8888);
+    // grabWindow() reads back whatever the QSG software adaptation
+    // just rasterized -- no separate FBO/texture readback step needed
+    // (that was the GL path's job; see this file's Impl comment).
+    QImage image = impl->quickWindow->grabWindow().convertToFormat(
+        QImage::Format_RGBA8888);
 
     std::vector<uint8_t> pixels(static_cast<size_t>(width) * height * 4);
     for(int row = 0; row < height; row++) {
