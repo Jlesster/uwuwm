@@ -562,19 +562,64 @@ bool Server::setup(int argc, char** argv) {
             "wlr_xwayland_create failed -- continuing without X11 app support");
     }
 
-    // 9. listen on a free Wayland socket, start the backend, run.
+    // 9. listen on a free Wayland socket. wlr_backend_start() itself is
+    // deliberately NOT called here -- see startBackend() and its call
+    // site in run() for why.
     const char* socket = wl_display_add_socket_auto(display);
     if(!socket) {
         wlr_log(WLR_ERROR, "wl_display_add_socket_auto failed");
         return false;
     }
+    pending_socket = socket;
 
+    return true;
+}
+
+// ----------------------------------------------------------------------------
+// Split out of setup() -- root-caused a full compositor hang (black
+// screen, dead keybinds, VT switch unresponsive, only recoverable with
+// a hard reboot) that traced back to ordering, not to Qt/QML/GL/driver
+// specifics as earlier fix attempts assumed.
+//
+// setup() used to call wlr_backend_start() directly, synchronously,
+// *before* run() ever reaches g_main_loop_run(). wlr_backend_start()
+// scans connectors and fires backend->events.new_output for each one
+// right there on the calling stack -- Output::Output()'s constructor
+// chain ends in fireOutputEvent("output::connect", ...), which runs
+// the user's monitor_connected Lua hook synchronously, which (rc.lua's
+// own setup_bar()) calls uwu.qml.create() -- the *first* time this
+// process ever touches QQmlEngine/QQuickRenderControl.
+//
+// But qt_runtime's QGuiApplication relies entirely on glib_loop's
+// GSource (attached to the default GMainContext in glib_loop.hpp) to
+// ever dispatch anything through QPAEventDispatcherGlib -- posted
+// events, queued connections, QML's own async plugin/type loading all
+// go through that. That GSource is only ever iterated once
+// g_main_loop_run(main_loop) is running, and that call happens in
+// run(), strictly *after* setup() (and therefore the old inline
+// wlr_backend_start()) had already returned. So the very first
+// QQmlComponent::create()/QQuickRenderControl::initialize() calls were
+// unconditionally blocking on a dispatcher that could not physically
+// run yet -- not a race, not GPU/driver flakiness, a deterministic
+// deadlock on every boot. And because it happens on this compositor's
+// one and only thread, mid wlr_backend_start(), with DRM master
+// already held, nothing else -- input, VT-switch signal handling --
+// ever gets serviced again either, which is exactly the "kernel hang,
+// need a hard reboot" symptom.
+//
+// Fix: don't call wlr_backend_start() until g_main_loop_run() is
+// already pumping the loop. run() schedules this via
+// wl_event_loop_add_idle so it becomes the very first thing dispatched
+// once the loop is live -- output::connect (and any QML it triggers)
+// still fires synchronously and unchanged from here, just now with a
+// real, running event loop underneath it.
+bool Server::startBackend() {
     if(!wlr_backend_start(backend)) {
         wlr_log(WLR_ERROR, "wlr_backend_start failed");
         return false;
     }
 
-    // 9b. wire up session active/inactive now that outputs exist
+    // wire up session active/inactive now that outputs exist
     if(session) {
         session_active_listener.connect(&session->events.active, [this](void*) {
             session_active = session->active;
@@ -586,14 +631,15 @@ bool Server::setup(int argc, char** argv) {
         });
     }
 
-    setenv("WAYLAND_DISPLAY", socket, true);
-    wlr_log(WLR_INFO, "uwuwm running on WAYLAND_DISPLAY=%s", socket);
+    setenv("WAYLAND_DISPLAY", pending_socket.c_str(), true);
+    wlr_log(WLR_INFO, "uwuwm running on WAYLAND_DISPLAY=%s",
+            pending_socket.c_str());
 
-    // 9c. IPC socket, last -- deliberately not fatal if it fails (a
-    // stray leftover socket file, a read-only $XDG_RUNTIME_DIR, ...):
-    // uwuwm has run with no IPC since it existed, and a broken IPC
-    // handler shouldn't take down the whole session over it. See
-    // ipc.hpp for the socket path and protocol.
+    // IPC socket, last -- deliberately not fatal if it fails (a stray
+    // leftover socket file, a read-only $XDG_RUNTIME_DIR, ...): uwuwm
+    // has run with no IPC since it existed, and a broken IPC handler
+    // shouldn't take down the whole session over it. See ipc.hpp for
+    // the socket path and protocol.
     ipc = std::make_unique<IpcServer>(*this);
     if(ipc->socketPath().empty()) {
         wlr_log(WLR_ERROR, "IPC socket setup failed -- continuing without it");
@@ -603,6 +649,7 @@ bool Server::setup(int argc, char** argv) {
             WLR_INFO, "uwuwm IPC listening on %s", ipc->socketPath().c_str());
     }
 
+    spawnAutostart();
     return true;
 }
 
@@ -629,7 +676,20 @@ int Server::run(int argc, char** argv) {
 
     if(!setup(argc, argv)) { return 1; }
 
-    spawnAutostart();
+    // startBackend() (wlr_backend_start() + everything downstream of the
+    // outputs it creates) is deliberately deferred to the loop's first
+    // idle dispatch rather than called here inline -- see startBackend()'s
+    // own comment in server.cpp for the hang this fixes. spawnAutostart()
+    // moved inside startBackend() to preserve the original
+    // backend-started-before-autostart ordering.
+    wl_event_loop* loop = wl_display_get_event_loop(display);
+    wl_event_loop_add_idle(
+        loop,
+        [](void* data) {
+            auto* self = static_cast<Server*>(data);
+            if(!self->startBackend()) { self->requestQuit(); }
+        },
+        this);
 
     g_main_loop_run(main_loop);
 

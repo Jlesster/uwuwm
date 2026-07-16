@@ -121,6 +121,15 @@ public:
     // destroyed).
     std::unique_ptr<GlibEventLoop> glib_loop;
 
+    // wl_display_add_socket_auto()'s return value, from setup(), held
+    // here until startBackend() runs (deferred -- see that function's
+    // comment) and can setenv(WAYLAND_DISPLAY, ...) with it. The
+    // wl_display owns the underlying string's storage for the life of
+    // the display, so copying it into pending_socket here isn't
+    // strictly required for validity, but makes the ownership/lifetime
+    // story explicit rather than relying on that.
+    std::string                  pending_socket;
+
     wlr_backend*                 backend              = nullptr;
     wlr_session*                 session              = nullptr;
     bool                         session_active       = true;
@@ -412,6 +421,12 @@ private:
     // main()'s locals outlive that easily, but setup() taking no
     // arguments before had nothing that needed them.
     bool setup(int argc, char** argv);
+    // Split out of setup() deliberately -- see the long comment at this
+    // function's call site in run() for why wlr_backend_start() (and
+    // everything downstream of the outputs it creates, including any
+    // uwu.qml.create() a monitor_connected hook fires) must not run
+    // until g_main_loop_run() is already pumping glib_loop's GSource.
+    bool startBackend();
     void spawnAutostart();
 
     Listener<wlr_output>                          new_output;
