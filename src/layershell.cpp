@@ -6,6 +6,7 @@ extern "C" {
 }
 
 #include "bar.hpp"
+#include "qml_bar.hpp"
 #include "layout.hpp"
 #include "output.hpp"
 #include "popup.hpp"
@@ -123,6 +124,19 @@ void arrangeLayers(Output& output) {
     // so calling it here regardless of what shrinks `usable` next is
     // safe.
     for(Bar* bar : output.bars) {
+        if(bar->height <= 0) { continue; }
+        if(bar->position == BarPosition::Top) {
+            usable.y += bar->height;
+            usable.height -= bar->height;
+        } else {
+            usable.height -= bar->height;
+        }
+        bar->reposition();
+    }
+
+    // Same accounting, same reasoning, for uwu.qml.create()'d bars --
+    // see the comment above this loop's Bar counterpart.
+    for(QmlBar* bar : output.qml_bars) {
         if(bar->height <= 0) { continue; }
         if(bar->position == BarPosition::Top) {
             usable.y += bar->height;

@@ -101,6 +101,15 @@ struct Output {
     // and stack correctly if both are present on the same edge.
     std::vector<struct Bar*> bars;
 
+    // uwu.qml.create()'d bars (qml_bar.hpp) anchored to this output --
+    // same non-owning contract as `bars` above (Server::qml_bars is the
+    // owner), kept as its own vector rather than folded into `bars`
+    // since QmlBar and Bar share no common base (see qml_bar.hpp's own
+    // comment for why). arrangeLayers() folds these into usable_box
+    // the same way it already does for `bars` and client layer-shell
+    // exclusive zones.
+    std::vector<class QmlBar*> qml_bars;
+
     // Animated tag/workspace switch: enables both the outgoing and
     // incoming tagset's views simultaneously and slides them past each
     // other (View::playSlideOut/playSlideIn), landing on the normal

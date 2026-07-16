@@ -1,6 +1,8 @@
 #include "server.hpp"
 
 #include "bar.hpp"
+#include "qml_bar.hpp"
+#include "qt_runtime.hpp"
 
 extern "C" {
 #include <wlr/types/wlr_content_type_v1.h>
@@ -101,6 +103,18 @@ Server::~Server() {
     session_active_listener.disconnect();
 
     if(session) { wlr_session_destroy(session); }
+    // qml_bars before qt_runtime: each QmlBar's Qt objects (QQuickWindow,
+    // QQmlComponents, ...) need the shared QGuiApplication/QQmlEngine
+    // qt_runtime owns to still be alive while they're torn down, so
+    // qt_runtime can't go first -- same reasoning as glib_loop.reset()
+    // below needing to happen before display is destroyed.
+    qml_bars.clear();
+    qt_runtime.reset();
+    glib_loop.reset();
+    if(main_loop) {
+        g_main_loop_unref(main_loop);
+        main_loop = nullptr;
+    }
     if(display) {
         wl_display_destroy_clients(display);
         wl_display_destroy(display);
@@ -111,7 +125,14 @@ Server::~Server() {
 // §2.2 setup sequence. Comment numbers below match the doc's numbered list
 // so this function can be read directly against it.
 // ----------------------------------------------------------------------------
-bool Server::setup() {
+bool Server::setup(int argc, char** argv) {
+    // Constructed before rc.lua even loads: this repo's own rc.lua
+    // calls uwu.bar.create() at top level (not from a hook), and
+    // uwu.qml.create() needs to be at least as available -- qt_runtime
+    // has to exist before lua_cfg.load() below, not just before
+    // display/backend/outputs do.
+    qt_runtime = std::make_unique<QtRuntime>(argc, argv);
+
     // 0. rc.lua, before anything else touches wlroots. This is uwuwm's
     // equivalent of AwesomeWM reading rc.lua before it does anything else
     // -- keybinds, gap/border/color settings, and terminal/launcher all
@@ -127,15 +148,21 @@ bool Server::setup() {
     // 1. core Wayland server object, owns the event loop
     display             = wl_display_create();
     wl_event_loop* loop = wl_display_get_event_loop(display);
+    main_loop            = g_main_loop_new(nullptr, FALSE);
+    glib_loop           = std::make_unique<GlibEventLoop>(loop);
 
-    // 1b. graceful shutdown on SIGINT/SIGTERM
+    // 1b. graceful shutdown on SIGINT/SIGTERM. Goes through
+    // requestQuit() (same method uwu.quit() calls from Lua, see
+    // lua_config.cpp) rather than wl_display_terminate() directly --
+    // now that main_loop is what Server::run() actually blocks in,
+    // just setting display's terminate flag wouldn't stop anything.
     auto onSignal = [](int sig, void* data) -> int {
         (void)sig;
-        wl_display_terminate(static_cast<wl_display*>(data));
+        static_cast<Server*>(data)->requestQuit();
         return 0;
     };
-    wl_event_loop_add_signal(loop, SIGINT, onSignal, display);
-    wl_event_loop_add_signal(loop, SIGTERM, onSignal, display);
+    wl_event_loop_add_signal(loop, SIGINT, onSignal, this);
+    wl_event_loop_add_signal(loop, SIGTERM, onSignal, this);
 
     // 1b-ii. SIGHUP hot-reloads rc.lua, same idea as nginx/sway/etc. This
     // fires from the event loop, not from inside a Lua callback, so it's
@@ -598,16 +625,13 @@ void Server::spawnAutostart() {
 }
 
 int Server::run(int argc, char** argv) {
-    (void)argc;
-    (void)argv;
-
     wlr_log_init(WLR_DEBUG, nullptr);
 
-    if(!setup()) { return 1; }
+    if(!setup(argc, argv)) { return 1; }
 
     spawnAutostart();
 
-    wl_display_run(display);
+    g_main_loop_run(main_loop);
 
     wl_display_destroy_clients(display);
     return 0;

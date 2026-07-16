@@ -8,6 +8,7 @@ extern "C" {
 }
 
 #include "bar.hpp"
+#include "qml_bar.hpp"
 #include "dwindle.hpp"
 #include "idle.hpp"
 #include "layershell.hpp"
@@ -270,6 +271,9 @@ Output::~Output() {
     // here, same as an unplugged monitor's windows don't get destroyed,
     // just detached/refocused elsewhere.
     for(Bar* bar : bars) { bar->detachFromOutput(); }
+    // Same treatment, same reasoning, for uwu.qml.create()'d bars --
+    // see the comment directly above.
+    for(QmlBar* bar : qml_bars) { bar->detachFromOutput(); }
 
     // Unlike background_rect (never explicitly destroyed -- it lives
     // under a shared layer_tree that outlives any one Output, and letting

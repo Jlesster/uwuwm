@@ -594,79 +594,126 @@ end)
 -- panel" if you tend to drag it onto an external display by accident.
 
 -- ── Status bar ───────────────────────────────────────────────────────
--- uwu.bar.create() -- a native, compositor-drawn status bar (no
--- swaybg-style external process; see uwu.bar in lib/meta/uwu.lua for
--- the full method list). This is the raw-primitives version -- draw
--- calls, a redraw function, a timer -- not a widget-composition layer
--- like AwesomeWM's wibox; there's no paw.bar/nyaa.bar yet, this is
--- straight uwu.bar.* plus a couple dozen lines of Lua.
+-- uwu.qml.create() -- a retained-mode QtQuick bar (src/qml_bar.cpp).
+-- Unlike uwu.bar's immediate-mode "redraw the whole pixel buffer on
+-- every commit" model, uwu.qml creates real QQuickItems exactly once;
+-- later set_color/set_text/set_pos/set_size just mutate the already-
+-- live widget's Qt properties and QtQuick's own scenegraph re-renders
+-- only what actually changed. So instead of a per-tick redraw that
+-- tears down and rebuilds the entire bar, setup_bar() below is
+-- one-time (widgets persist) and update_bar() just pokes the existing
+-- widgets' colors/text and commits.
 --
--- Adjust FONT to whatever's actually installed -- uwu.bar doesn't look
--- up fonts by name, only by path (see Bar:text()'s own doc comment).
-local FONT = '/usr/share/fonts/TTF/JetBrainsMonoNerdFont-Regular.ttf'
+-- Caveats vs. the old uwu.bar:
+--   * no :clear()    -- emulate it with a full-bar background rect
+--   * no :text_width -- right-align the clock by fixed margin (70px is
+--                      more than HH:MM:SS at font_size 14)
+--   * no font arg    -- the text() widget uses the system default font
 local pal = nyaa.palette('catppuccin_mocha')
 
--- "#rrggbb" -> 0xRRGGBBAA integer (uwu.bar's color format), alpha fixed
--- at full opacity -- every nyaa.palette() role is already an opaque hex
--- string, nothing here ever needs a translucent draw.
+-- "#rrggbb" -> 0xRRGGBBAA integer (uwu.qml's color format), alpha
+-- fixed at full opacity -- every nyaa.palette() role is already an
+-- opaque hex string, nothing here ever needs a translucent draw.
 local function hex(h)
   return tonumber(h:sub(2), 16) * 256 + 0xff
 end
 
-local bar = uwu.bar.create({ position = 'top', height = 28 })
+-- Boot-time ordering: rc.lua runs *before* the wl_display/backend are
+-- created (server.cpp:142 `lua_cfg.load()` is step 0, before
+-- `wl_display_create()` in step 1) and therefore well before any
+-- output exists. uwu.qml.create() needs a target output and refuses
+-- to queue itself for later, so calling it at top level is a hard
+-- error -- "no output to attach to yet" out of l_qml_create. Defer
+-- the whole bar setup to the first monitor_connected event, by which
+-- point server->focused_output is guaranteed set (output.cpp:243 sets
+-- it right before firing output::connect). The guard makes a
+-- hot-plugged second monitor a no-op rather than creating a second
+-- bar -- matches the original single-bar rc.lua's behavior; if you
+-- want one bar per output, drop the guard and capture each `bar` in
+-- a list instead.
+local bar, clock = nil, nil
+local tag_rects, tag_texts = {}, {}
+local function setup_bar()
+  if bar then return end
+  bar = uwu.qml.create({ position = 'top', height = 28 })
 
-local function redraw_bar()
-  bar:clear(hex(pal.mantle))
+  -- Background rect -- emulates the old uwu.bar:clear(). Created
+  -- once; never re-rect'd.
+  bar:rect({
+    x = 0, y = 0,
+    w = bar:width(), h = bar:height(),
+    color = hex(pal.mantle),
+  })
 
-  -- Tag indicator: one 20px square per tag, active tag(s) on the
-  -- *focused* monitor highlighted in mauve. uwu.tag.view() (below, in
-  -- on_click) only ever targets the focused output too, so this
-  -- intentionally tracks the same one rather than whichever output the
-  -- bar itself happens to be on -- on a multi-monitor setup with a bar
-  -- per output, every bar ends up showing/driving the same (focused)
-  -- output's tags, which is a real limitation worth knowing about
-  -- rather than a bug: there's no per-output tag click-through here.
-  local focused_tagset = 0
-  for _, m in ipairs(uwu.monitor.list()) do
-    if m.focused then
-      focused_tagset = m.tagset
-      break
-    end
-  end
   for i = 1, uwu.tag_count do
     local x = 4 + (i - 1) * 24
-    local active = (focused_tagset & (1 << (i - 1))) ~= 0
-    bar:rect(x, 4, 20, 20, active and hex(pal.mauve) or hex(pal.surface0))
-    bar:text(
-      x + 6,
-      18,
-      tostring(i),
-      FONT,
-      12,
-      active and hex(pal.base) or hex(pal.subtext0)
-    )
+    tag_rects[i] = bar:rect({
+      x = x, y = 4, w = 20, h = 20,
+      color = hex(pal.surface0),  -- initial = inactive
+    })
+    tag_texts[i] = bar:text({
+      x = x + 6, y = 18,
+      text = tostring(i),
+      font_size = 12,
+      color = hex(pal.subtext0),  -- initial = inactive
+    })
   end
 
-  -- Clock, right-aligned -- text_width() first since :text() itself
-  -- only ever draws left-to-right from the x you give it.
-  local clock = os.date('%H:%M:%S')
-  local w = bar:text_width(clock, FONT, 14)
-  bar:text(bar:width() - w - 10, 19, clock, FONT, 14, hex(pal.text))
+  -- Clock -- one text widget, never recreated. update_bar() just
+  -- calls set_text() on it. x is a fixed right margin rather than a
+  -- measured width (uwu.qml has no text_width); 70px is wider than
+  -- "HH:MM:SS" at font_size 14 with any reasonable system default
+  -- font. Re-positioned on every update so a hot-plugged
+  -- wider/narrower output still pins the clock to the right edge.
+  clock = bar:text({
+    x = bar:width() - 70, y = 19,
+    text = '',
+    font_size = 14,
+    color = hex(pal.text),
+  })
 
-  bar:commit()
+  -- Tag indicator: active tag(s) on the *focused* monitor
+  -- highlighted in mauve. uwu.tag.view() (below, in on_click) only
+  -- ever targets the focused output too, so this intentionally
+  -- tracks the same one rather than whichever output the bar itself
+  -- happens to be on -- on a multi-monitor setup with a bar per
+  -- output, every bar ends up showing/driving the same (focused)
+  -- output's tags, which is a real limitation worth knowing about
+  -- rather than a bug: there's no per-output tag click-through here.
+  local function update_bar()
+    local focused_tagset = 0
+    for _, m in ipairs(uwu.monitor.list()) do
+      if m.focused then
+        focused_tagset = m.tagset
+        break
+      end
+    end
+    for i = 1, uwu.tag_count do
+      local active = (focused_tagset & (1 << (i - 1))) ~= 0
+      tag_rects[i]:set_color(active and hex(pal.mauve) or hex(pal.surface0))
+      tag_texts[i]:set_color(active and hex(pal.base) or hex(pal.subtext0))
+    end
+
+    clock:set_pos(bar:width() - 70, 19)
+    clock:set_text(os.date('%H:%M:%S'))
+
+    bar:commit()
+  end
+
+  -- Tag squares are a fixed 24px pitch starting at x=4 (see the
+  -- setup loop above) -- inverting that back to a tag number here
+  -- rather than tracking hit-rects separately for ten squares.
+  bar:on_click(function(x, _, _)
+    local tag = math.floor((x - 4) / 24) + 1
+    if tag >= 1 and tag <= uwu.tag_count then
+      uwu.tag.view(tag)
+    end
+  end)
+
+  update_bar()
+  uwu.timer.set_interval(1, update_bar) -- clock tick
+  paw.on('tags_changed', update_bar) -- instant update on tag switch,
+  -- not up to a second stale
 end
 
--- Tag squares are a fixed 24px pitch starting at x=4 (see redraw_bar
--- above) -- inverting that back to a tag number here rather than
--- tracking hit-rects separately for ten squares.
-bar:on_click(function(x, _, _)
-  local tag = math.floor((x - 4) / 24) + 1
-  if tag >= 1 and tag <= uwu.tag_count then
-    uwu.tag.view(tag)
-  end
-end)
-
-redraw_bar()
-uwu.timer.set_interval(1, redraw_bar) -- clock tick
-paw.on('tags_changed', redraw_bar) -- instant update on tag switch,
--- not up to a second stale
+paw.on('monitor_connected', setup_bar)

@@ -23,6 +23,7 @@ extern "C" {
 
 #include "config.hpp"
 #include "bar.hpp"
+#include "qml_bar.hpp"
 #include "dwindle.hpp"
 #include "input.hpp"
 #include "ipc.hpp"
@@ -2134,6 +2135,288 @@ void registerBarMetatable(lua_State* L) {
     lua_pop(L, 1);
 }
 
+// ----------------------------------------------------------------------------
+// uwu.qml.* -- the retained-mode QtQuick bar (qml_bar.hpp/qml_bar.cpp).
+// Mirrors uwu.bar.*'s own structure immediately above almost exactly
+// (id-keyed userdata looked up through Server::qml_bars, same
+// stale-reference error convention) -- the one addition is
+// uwu.QmlWidget, a second, lighter userdata returned by bar:rect()/
+// bar:text() so a clock-style widget updated from uwu.timer() doesn't
+// have to carry its parent bar around by hand to call set_text() on
+// itself.
+// ----------------------------------------------------------------------------
+
+constexpr const char* kQmlBarMeta    = "uwu.QmlBar";
+constexpr const char* kQmlWidgetMeta = "uwu.QmlWidget";
+
+struct LuaQmlBar {
+    int id;
+};
+
+struct LuaQmlWidget {
+    int bar_id;
+    int widget_id;
+};
+
+QmlBar* checkQmlBar(lua_State* L, int idx) {
+    auto*   b      = static_cast<LuaQmlBar*>(luaL_checkudata(L, idx, kQmlBarMeta));
+    Server* server = getServer(L);
+    auto    it     = server->qml_bars.find(b->id);
+    if(it == server->qml_bars.end()) {
+        luaL_error(L, "uwu.qml: stale bar reference (already destroyed)");
+    }
+    return it->second.get();
+}
+
+void pushQmlBar(lua_State* L, int id) {
+    auto* b = static_cast<LuaQmlBar*>(lua_newuserdata(L, sizeof(LuaQmlBar)));
+    b->id   = id;
+    luaL_getmetatable(L, kQmlBarMeta);
+    lua_setmetatable(L, -2);
+}
+
+// Unlike checkQmlBar (a hard error on a stale bar, matching checkBar's
+// own behavior), a stale *widget* -- its bar still alive but the
+// widget_id no longer present -- is not an error here: QmlBar::setText
+// & co already treat an unknown widget_id as a silent no-op (see
+// qml_bar.hpp's comment on why), and this just extends that same
+// leniency one layer out.
+QmlBar* checkQmlWidgetBar(lua_State* L, int idx, int& out_widget_id) {
+    auto*   w      = static_cast<LuaQmlWidget*>(luaL_checkudata(L, idx, kQmlWidgetMeta));
+    Server* server = getServer(L);
+    auto    it     = server->qml_bars.find(w->bar_id);
+    if(it == server->qml_bars.end()) {
+        luaL_error(L, "uwu.qml: stale widget reference (bar already destroyed)");
+    }
+    out_widget_id = w->widget_id;
+    return it->second.get();
+}
+
+void pushQmlWidget(lua_State* L, int bar_id, int widget_id) {
+    auto* w      = static_cast<LuaQmlWidget*>(lua_newuserdata(L, sizeof(LuaQmlWidget)));
+    w->bar_id    = bar_id;
+    w->widget_id = widget_id;
+    luaL_getmetatable(L, kQmlWidgetMeta);
+    lua_setmetatable(L, -2);
+}
+
+// uwu.qml.create({output=, position="top"/"bottom", height=}) -> QmlBar.
+// Same fields, same defaults, same output-resolution fallback chain as
+// uwu.bar.create() above -- see that function's comment.
+int l_qml_create(lua_State* L) {
+    luaL_checktype(L, 1, LUA_TTABLE);
+    Server* server = getServer(L);
+
+    std::string output_name;
+    bool        has_output = false;
+    getOptionalField(L, 1, "output", output_name, has_output);
+
+    std::string position_str = "top";
+    bool        has_position = false;
+    getOptionalField(L, 1, "position", position_str, has_position);
+    BarPosition position =
+        (position_str == "bottom") ? BarPosition::Bottom : BarPosition::Top;
+
+    double height_d   = 30;
+    bool   has_height = false;
+    getOptionalField(L, 1, "height", height_d, has_height);
+    int height = static_cast<int>(height_d);
+
+    Output* target = nullptr;
+    if(has_output) {
+        for(auto& out : server->outputs) {
+            if(output_name == out->wlr_output->name) {
+                target = out.get();
+                break;
+            }
+        }
+        if(!target) {
+            luaL_error(
+                L, "uwu.qml.create: no such output '%s'", output_name.c_str());
+            return 0;
+        }
+    } else {
+        target = server->focused_output;
+        if(!target && !server->outputs.empty()) {
+            target = server->outputs.front().get();
+        }
+    }
+    if(!target) {
+        luaL_error(L, "uwu.qml.create: no output to attach to yet");
+        return 0;
+    }
+
+    auto bar = std::make_unique<QmlBar>(
+        *server, *target, position, height, *server->qt_runtime);
+    int id  = server->next_qml_bar_id++;
+    bar->id = id;
+    target->qml_bars.push_back(bar.get());
+    server->qml_bars.emplace(id, std::move(bar));
+
+    // Same immediate re-sweep uwu.bar.create() does -- see that
+    // function's comment.
+    arrangeLayers(*target);
+
+    pushQmlBar(L, id);
+    return 1;
+}
+
+int l_qml_destroy(lua_State* L) {
+    QmlBar* bar    = checkQmlBar(L, 1);
+    int     id     = bar->id;
+    Output* output = bar->output;
+    if(bar->click_fn_ref != -2) {
+        luaL_unref(L, LUA_REGISTRYINDEX, bar->click_fn_ref);
+    }
+    getServer(L)->qml_bars.erase(id);  // ~QmlBar() detaches from output itself
+    if(output) { arrangeLayers(*output); }
+    return 0;
+}
+
+// bar:rect({x=, y=, w=, h=, color=}) -> QmlWidget. Instantiated exactly
+// once here; every later change goes through widget:set_color()/
+// set_pos()/set_size() below, never a second rect() call for the same
+// visual element.
+int l_qml_rect(lua_State* L) {
+    QmlBar* bar = checkQmlBar(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    int      x = 0, y = 0, w = 0, h = 0;
+    uint32_t color      = 0x000000ffu;
+    bool     has_unused = false;
+    getOptionalField(L, 2, "x", x, has_unused);
+    getOptionalField(L, 2, "y", y, has_unused);
+    getOptionalField(L, 2, "w", w, has_unused);
+    getOptionalField(L, 2, "h", h, has_unused);
+    getOptionalField(L, 2, "color", color, has_unused);
+
+    int widget_id = bar->createRect(x, y, w, h, color);
+    pushQmlWidget(L, bar->id, widget_id);
+    return 1;
+}
+
+// bar:text({x=, y=, text=, font_size=, color=}) -> QmlWidget.
+int l_qml_text(lua_State* L) {
+    QmlBar* bar = checkQmlBar(L, 1);
+    luaL_checktype(L, 2, LUA_TTABLE);
+
+    int         x = 0, y = 0, font_size = 14;
+    std::string text;
+    uint32_t    color      = 0xffffffffu;
+    bool        has_unused = false;
+    getOptionalField(L, 2, "x", x, has_unused);
+    getOptionalField(L, 2, "y", y, has_unused);
+    getOptionalField(L, 2, "text", text, has_unused);
+    getOptionalField(L, 2, "font_size", font_size, has_unused);
+    getOptionalField(L, 2, "color", color, has_unused);
+
+    int widget_id = bar->createText(x, y, text, font_size, color);
+    pushQmlWidget(L, bar->id, widget_id);
+    return 1;
+}
+
+int l_qml_commit(lua_State* L) {
+    checkQmlBar(L, 1)->commit();
+    return 0;
+}
+
+int l_qml_on_click(lua_State* L) {
+    QmlBar* bar = checkQmlBar(L, 1);
+    luaL_checktype(L, 2, LUA_TFUNCTION);
+    if(bar->click_fn_ref != -2) {
+        luaL_unref(L, LUA_REGISTRYINDEX, bar->click_fn_ref);
+    }
+    lua_pushvalue(L, 2);
+    bar->click_fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    return 0;
+}
+
+int l_qml_width(lua_State* L) {
+    lua_pushinteger(L, checkQmlBar(L, 1)->width);
+    return 1;
+}
+int l_qml_height(lua_State* L) {
+    lua_pushinteger(L, checkQmlBar(L, 1)->height);
+    return 1;
+}
+
+// widget:set_text(str) -- plain property poke, no re-parsing/
+// recreation (see qml_bar.hpp's own comment on why this is the whole
+// point of the retained-mode redesign).
+int l_qml_widget_set_text(lua_State* L) {
+    int         widget_id;
+    QmlBar*     bar  = checkQmlWidgetBar(L, 1, widget_id);
+    const char* text = luaL_checkstring(L, 2);
+    bar->setText(widget_id, text);
+    return 0;
+}
+
+int l_qml_widget_set_color(lua_State* L) {
+    int      widget_id;
+    QmlBar*  bar   = checkQmlWidgetBar(L, 1, widget_id);
+    uint32_t color = static_cast<uint32_t>(luaL_checkinteger(L, 2));
+    bar->setColor(widget_id, color);
+    return 0;
+}
+
+int l_qml_widget_set_pos(lua_State* L) {
+    int     widget_id;
+    QmlBar* bar = checkQmlWidgetBar(L, 1, widget_id);
+    int     x   = static_cast<int>(luaL_checkinteger(L, 2));
+    int     y   = static_cast<int>(luaL_checkinteger(L, 3));
+    bar->setPos(widget_id, x, y);
+    return 0;
+}
+
+int l_qml_widget_set_size(lua_State* L) {
+    int     widget_id;
+    QmlBar* bar = checkQmlWidgetBar(L, 1, widget_id);
+    int     w   = static_cast<int>(luaL_checkinteger(L, 2));
+    int     h   = static_cast<int>(luaL_checkinteger(L, 3));
+    bar->setSize(widget_id, w, h);
+    return 0;
+}
+
+const luaL_Reg kQmlBarMethods[] = {
+    {"rect",     l_qml_rect    },
+    {"text",     l_qml_text    },
+    {"commit",   l_qml_commit  },
+    {"on_click", l_qml_on_click},
+    {"destroy",  l_qml_destroy },
+    {"width",    l_qml_width   },
+    {"height",   l_qml_height  },
+    {nullptr,    nullptr       },
+};
+
+const luaL_Reg kQmlWidgetMethods[] = {
+    {"set_text",  l_qml_widget_set_text },
+    {"set_color", l_qml_widget_set_color},
+    {"set_pos",   l_qml_widget_set_pos  },
+    {"set_size",  l_qml_widget_set_size },
+    {nullptr,     nullptr               },
+};
+
+const luaL_Reg kQmlFuncs[] = {
+    {"create", l_qml_create},
+    {nullptr,  nullptr     },
+};
+
+void registerQmlBarMetatable(lua_State* L) {
+    luaL_newmetatable(L, kQmlBarMeta);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, kQmlBarMethods, 0);
+    lua_pop(L, 1);
+}
+
+void registerQmlWidgetMetatable(lua_State* L) {
+    luaL_newmetatable(L, kQmlWidgetMeta);
+    lua_pushvalue(L, -1);
+    lua_setfield(L, -2, "__index");
+    luaL_setfuncs(L, kQmlWidgetMethods, 0);
+    lua_pop(L, 1);
+}
+
 
 // uwu.wallpaper.set(name, {path=, mode=}) -- name is an output name or
 // "*" for every output not otherwise matched by a more specific rule,
@@ -2764,6 +3047,8 @@ void LuaConfig::init(Server& server) {
     // slot on `uwu` itself.
     registerClientMetatable(L);
     registerBarMetatable(L);
+    registerQmlBarMetatable(L);
+    registerQmlWidgetMetatable(L);
 
     lua_newtable(L);
     luaL_setfuncs(L, kuwuwmFuncs, 0);
@@ -2793,6 +3078,10 @@ void LuaConfig::init(Server& server) {
     lua_newtable(L);
     luaL_setfuncs(L, kBarFuncs, 0);
     lua_setfield(L, -2, "bar");
+
+    lua_newtable(L);
+    luaL_setfuncs(L, kQmlFuncs, 0);
+    lua_setfield(L, -2, "qml");
 
     lua_newtable(L);
     luaL_setfuncs(L, kTagFuncs, 0);
