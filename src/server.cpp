@@ -1,8 +1,7 @@
 #include "server.hpp"
 
 #include "bar.hpp"
-#include "qml_bar.hpp"
-#include "qt_runtime.hpp"
+#include "widget.hpp"
 
 extern "C" {
 #include <wlr/types/wlr_content_type_v1.h>
@@ -103,18 +102,7 @@ Server::~Server() {
     session_active_listener.disconnect();
 
     if(session) { wlr_session_destroy(session); }
-    // qml_bars before qt_runtime: each QmlBar's Qt objects (QQuickWindow,
-    // QQmlComponents, ...) need the shared QGuiApplication/QQmlEngine
-    // qt_runtime owns to still be alive while they're torn down, so
-    // qt_runtime can't go first -- same reasoning as glib_loop.reset()
-    // below needing to happen before display is destroyed.
-    qml_bars.clear();
-    qt_runtime.reset();
-    glib_loop.reset();
-    if(main_loop) {
-        g_main_loop_unref(main_loop);
-        main_loop = nullptr;
-    }
+    widget_windows.clear();
     if(display) {
         wl_display_destroy_clients(display);
         wl_display_destroy(display);
@@ -125,37 +113,29 @@ Server::~Server() {
 // §2.2 setup sequence. Comment numbers below match the doc's numbered list
 // so this function can be read directly against it.
 // ----------------------------------------------------------------------------
-bool Server::setup(int argc, char** argv) {
-    // Constructed before rc.lua even loads: this repo's own rc.lua
-    // calls uwu.bar.create() at top level (not from a hook), and
-    // uwu.qml.create() needs to be at least as available -- qt_runtime
-    // has to exist before lua_cfg.load() below, not just before
-    // display/backend/outputs do.
-    qt_runtime = std::make_unique<QtRuntime>(argc, argv);
-
-    // 0. rc.lua, before anything else touches wlroots. This is uwuwm's
-    // equivalent of AwesomeWM reading rc.lua before it does anything else
-    // -- keybinds, gap/border/color settings, and terminal/launcher all
-    // come from here now instead of config.hpp. A syntax/runtime error in
-    // a user's script is fatal, same as a config.hpp that failed to
-    // compile would have been.
+bool Server::setup() {
+    // 0. Register the uwu.* Lua API (the Lua interpreter itself is
+    // created here, in LuaConfig's constructor) but don't load rc.lua
+    // yet -- loading happens in startBackend() after the first
+    // wlr_backend_start() call has created at least one Output, so
+    // top-level `uwu.widget.window()` / `uwu.bar.create()` calls in
+    // rc.lua have something to attach to. The API surface itself
+    // (keybinds, rules, hooks) is pure data and doesn't need the
+    // display or any output to exist; the only thing that needs an
+    // output is the user's rc.lua body, and that gets a deferral
+    // rather than the user having to know "wrap everything in
+    // paw.on('monitor_connected', ...)" just to draw a bar. See
+    // startBackend() for the actual load call.
     lua_cfg.init(*this);
-    if(!lua_cfg.load()) {
-        wlr_log(WLR_ERROR, "failed to load configuration");
-        return false;
-    }
 
     // 1. core Wayland server object, owns the event loop
-    display             = wl_display_create();
-    wl_event_loop* loop = wl_display_get_event_loop(display);
-    main_loop            = g_main_loop_new(nullptr, FALSE);
-    glib_loop           = std::make_unique<GlibEventLoop>(loop);
+    display              = wl_display_create();
+    wl_event_loop* loop  = wl_display_get_event_loop(display);
 
     // 1b. graceful shutdown on SIGINT/SIGTERM. Goes through
     // requestQuit() (same method uwu.quit() calls from Lua, see
-    // lua_config.cpp) rather than wl_display_terminate() directly --
-    // now that main_loop is what Server::run() actually blocks in,
-    // just setting display's terminate flag wouldn't stop anything.
+    // lua_config.cpp) rather than wl_display_terminate() directly, so
+    // both paths funnel through one place.
     auto onSignal = [](int sig, void* data) -> int {
         (void)sig;
         static_cast<Server*>(data)->requestQuit();
@@ -259,7 +239,7 @@ bool Server::setup(int argc, char** argv) {
         wlr_keyboard_shortcuts_inhibit_v1_create(display);
     new_shortcuts_inhibitor.connect(
         &shortcuts_inhibit_manager->events.new_inhibitor,
-        [this](wlr_keyboard_shortcuts_inhibitor_v1* inhibitor) {
+        [](wlr_keyboard_shortcuts_inhibitor_v1* inhibitor) {
             wlr_keyboard_shortcuts_inhibitor_v1_activate(inhibitor);
         });
 
@@ -276,7 +256,7 @@ bool Server::setup(int argc, char** argv) {
     output_power_manager = wlr_output_power_manager_v1_create(display);
     output_power_set_mode.connect(
         &output_power_manager->events.set_mode,
-        [this](wlr_output_power_v1_set_mode_event* event) {
+        [](wlr_output_power_v1_set_mode_event* event) {
             wlr_output_state state;
             wlr_output_state_init(&state);
             wlr_output_state_set_enabled(
@@ -578,44 +558,60 @@ bool Server::setup(int argc, char** argv) {
 // ----------------------------------------------------------------------------
 // Split out of setup() -- root-caused a full compositor hang (black
 // screen, dead keybinds, VT switch unresponsive, only recoverable with
-// a hard reboot) that traced back to ordering, not to Qt/QML/GL/driver
-// specifics as earlier fix attempts assumed.
+// a hard reboot) that traced back to ordering: setup() used to call
+// wlr_backend_start() directly, synchronously, before run() ever
+// reached its main-loop call. wlr_backend_start() scans connectors and
+// fires backend->events.new_output for each one right there on the
+// calling stack -- Output::Output()'s constructor chain ends in
+// fireOutputEvent("output::connect", ...), which runs the user's
+// monitor_connected Lua hook synchronously. That hook used to be able
+// to reach uwu.widget.create(), and the old Qt-backed WidgetWindow's
+// QGuiApplication needed a *running* GMainLoop (only reached later, in
+// run()) to ever dispatch anything -- a deterministic deadlock, not a
+// race, on every boot, and because it happened mid wlr_backend_start()
+// with DRM master already held, nothing else on this compositor's one
+// thread ever got serviced again either.
 //
-// setup() used to call wlr_backend_start() directly, synchronously,
-// *before* run() ever reaches g_main_loop_run(). wlr_backend_start()
-// scans connectors and fires backend->events.new_output for each one
-// right there on the calling stack -- Output::Output()'s constructor
-// chain ends in fireOutputEvent("output::connect", ...), which runs
-// the user's monitor_connected Lua hook synchronously, which (rc.lua's
-// own setup_bar()) calls uwu.qml.create() -- the *first* time this
-// process ever touches QQmlEngine/QQuickRenderControl.
-//
-// But qt_runtime's QGuiApplication relies entirely on glib_loop's
-// GSource (attached to the default GMainContext in glib_loop.hpp) to
-// ever dispatch anything through QPAEventDispatcherGlib -- posted
-// events, queued connections, QML's own async plugin/type loading all
-// go through that. That GSource is only ever iterated once
-// g_main_loop_run(main_loop) is running, and that call happens in
-// run(), strictly *after* setup() (and therefore the old inline
-// wlr_backend_start()) had already returned. So the very first
-// QQmlComponent::create()/QQuickRenderControl::initialize() calls were
-// unconditionally blocking on a dispatcher that could not physically
-// run yet -- not a race, not GPU/driver flakiness, a deterministic
-// deadlock on every boot. And because it happens on this compositor's
-// one and only thread, mid wlr_backend_start(), with DRM master
-// already held, nothing else -- input, VT-switch signal handling --
-// ever gets serviced again either, which is exactly the "kernel hang,
-// need a hard reboot" symptom.
-//
-// Fix: don't call wlr_backend_start() until g_main_loop_run() is
-// already pumping the loop. run() schedules this via
-// wl_event_loop_add_idle so it becomes the very first thing dispatched
-// once the loop is live -- output::connect (and any QML it triggers)
-// still fires synchronously and unchanged from here, just now with a
-// real, running event loop underneath it.
+// WidgetWindow is Qt-free now (qml_bar.cpp) and that specific deadlock is
+// gone with it -- but the deferral itself is kept regardless: it costs
+// nothing (run()'s loop dispatches a scheduled idle callback as its
+// very first iteration either way) and it's still the more
+// conservative ordering in general -- output::connect firing before
+// the loop that services input/VT-switch/signals is actually running
+// is exactly the kind of ordering bug this whole comment exists to
+// warn future changes away from reintroducing, for whatever reason
+// next ends up running Lua hooks from inside output setup.
 bool Server::startBackend() {
     if(!wlr_backend_start(backend)) {
         wlr_log(WLR_ERROR, "wlr_backend_start failed");
+        return false;
+    }
+
+    // rc.lua -- now that the backend has been started and at least one
+    // Output has been created (wlr_backend_start above fires new_output
+    // synchronously for every connector it found). Deferring load to
+    // here is what lets a top-level `uwu.widget.window()` /
+    // `uwu.bar.create()` call in rc.lua succeed; doing it in setup()
+    // (where it used to be) meant those calls ran before any output
+    // existed and the compositor bailed out at startup on otherwise-
+    // valid config. The uwu.* API surface itself doesn't need this
+    // -- keybinds/rules/hooks are just data on LuaConfig -- only the
+    // user's rc.lua body needs the first Output to be alive by the
+    // time it runs.
+    //
+    // Side effect to be aware of: the `output::connect` event for
+    // already-connected outputs has already fired by this point (it
+    // fires synchronously from Output's constructor, which wlr_backend_start
+    // has just driven). Any `paw.on('monitor_connected', ...)` hook
+    // rc.lua registers will therefore only see *future* hot-plug
+    // events, not the initial output. That's why the example rc.lua
+    // also has a top-level `setup_bar()` call -- it's what gets the
+    // first output's bar in place. A future "fire all current
+    // outputs through the hook" pass here would let the top-level
+    // call be dropped; not done now because the example works as-is
+    // and the current behavior is at least well-defined.
+    if(!lua_cfg.load()) {
+        wlr_log(WLR_ERROR, "failed to load configuration");
         return false;
     }
 
@@ -671,10 +667,10 @@ void Server::spawnAutostart() {
     }
 }
 
-int Server::run(int argc, char** argv) {
+int Server::run() {
     wlr_log_init(WLR_DEBUG, nullptr);
 
-    if(!setup(argc, argv)) { return 1; }
+    if(!setup()) { return 1; }
 
     // startBackend() (wlr_backend_start() + everything downstream of the
     // outputs it creates) is deliberately deferred to the loop's first
@@ -691,7 +687,7 @@ int Server::run(int argc, char** argv) {
         },
         this);
 
-    g_main_loop_run(main_loop);
+    wl_display_run(display);
 
     wl_display_destroy_clients(display);
     return 0;

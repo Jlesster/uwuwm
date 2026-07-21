@@ -21,9 +21,8 @@ extern "C" {
 #include <xkbcommon/xkbcommon.h>
 }
 
-#include "config.hpp"
 #include "bar.hpp"
-#include "qml_bar.hpp"
+#include "config.hpp"
 #include "dwindle.hpp"
 #include "input.hpp"
 #include "ipc.hpp"
@@ -33,6 +32,7 @@ extern "C" {
 #include "server.hpp"
 #include "toplevel.hpp"
 #include "view.hpp"
+#include "widget.hpp"
 #include "xwayland_view.hpp"
 
 #include <dirent.h>
@@ -1962,8 +1962,8 @@ int l_bar_create(lua_State* L) {
     BarPosition position =
         (position_str == "bottom") ? BarPosition::Bottom : BarPosition::Top;
 
-    double height_d    = 30;
-    bool   has_height  = false;
+    double height_d   = 30;
+    bool   has_height = false;
     getOptionalField(L, 1, "height", height_d, has_height);
     int height = static_cast<int>(height_d);
 
@@ -2028,11 +2028,11 @@ int l_bar_clear(lua_State* L) {
 }
 
 int l_bar_rect(lua_State* L) {
-    Bar* bar = checkBar(L, 1);
-    int  x   = static_cast<int>(luaL_checkinteger(L, 2));
-    int  y   = static_cast<int>(luaL_checkinteger(L, 3));
-    int  w   = static_cast<int>(luaL_checkinteger(L, 4));
-    int  h   = static_cast<int>(luaL_checkinteger(L, 5));
+    Bar*     bar   = checkBar(L, 1);
+    int      x     = static_cast<int>(luaL_checkinteger(L, 2));
+    int      y     = static_cast<int>(luaL_checkinteger(L, 3));
+    int      w     = static_cast<int>(luaL_checkinteger(L, 4));
+    int      h     = static_cast<int>(luaL_checkinteger(L, 5));
     uint32_t color = static_cast<uint32_t>(luaL_checkinteger(L, 6));
     bar->fillRect(x, y, w, h, color);
     return 0;
@@ -2136,91 +2136,134 @@ void registerBarMetatable(lua_State* L) {
 }
 
 // ----------------------------------------------------------------------------
-// uwu.qml.* -- the retained-mode QtQuick bar (qml_bar.hpp/qml_bar.cpp).
-// Mirrors uwu.bar.*'s own structure immediately above almost exactly
-// (id-keyed userdata looked up through Server::qml_bars, same
-// stale-reference error convention) -- the one addition is
-// uwu.QmlWidget, a second, lighter userdata returned by bar:rect()/
-// bar:text() so a clock-style widget updated from uwu.timer() doesn't
-// have to carry its parent bar around by hand to call set_text() on
-// itself.
+// uwu.widget.* -- the retained-mode widget window (widget.hpp/
+// widget.cpp). uwu.WidgetWindow mirrors uwu.bar.*'s id-keyed userdata
+// pattern; uwu.Widget is a second, lighter userdata returned by
+// window:rect()/window:text() so a widget can be poked (set_text,
+// anchor, ...) without carrying its parent window around by hand.
 // ----------------------------------------------------------------------------
 
-constexpr const char* kQmlBarMeta    = "uwu.QmlBar";
-constexpr const char* kQmlWidgetMeta = "uwu.QmlWidget";
+constexpr const char* kWidgetWindowMeta = "uwu.WidgetWindow";
+constexpr const char* kWidgetMeta       = "uwu.Widget";
 
-struct LuaQmlBar {
+struct LuaWidgetWindow {
     int id;
 };
 
-struct LuaQmlWidget {
-    int bar_id;
+struct LuaWidget {
+    int window_id;
     int widget_id;
 };
 
-QmlBar* checkQmlBar(lua_State* L, int idx) {
-    auto*   b      = static_cast<LuaQmlBar*>(luaL_checkudata(L, idx, kQmlBarMeta));
+WidgetWindow* checkWidgetWindow(lua_State* L, int idx) {
+    auto* w = static_cast<LuaWidgetWindow*>(
+        luaL_checkudata(L, idx, kWidgetWindowMeta));
     Server* server = getServer(L);
-    auto    it     = server->qml_bars.find(b->id);
-    if(it == server->qml_bars.end()) {
-        luaL_error(L, "uwu.qml: stale bar reference (already destroyed)");
+    auto    it     = server->widget_windows.find(w->id);
+    if(it == server->widget_windows.end()) {
+        luaL_error(L, "uwu.widget: stale window reference (already destroyed)");
     }
     return it->second.get();
 }
 
-void pushQmlBar(lua_State* L, int id) {
-    auto* b = static_cast<LuaQmlBar*>(lua_newuserdata(L, sizeof(LuaQmlBar)));
-    b->id   = id;
-    luaL_getmetatable(L, kQmlBarMeta);
+void pushWidgetWindow(lua_State* L, int id) {
+    auto* w = static_cast<LuaWidgetWindow*>(
+        lua_newuserdata(L, sizeof(LuaWidgetWindow)));
+    w->id = id;
+    luaL_getmetatable(L, kWidgetWindowMeta);
     lua_setmetatable(L, -2);
 }
 
-// Unlike checkQmlBar (a hard error on a stale bar, matching checkBar's
-// own behavior), a stale *widget* -- its bar still alive but the
-// widget_id no longer present -- is not an error here: QmlBar::setText
-// & co already treat an unknown widget_id as a silent no-op (see
-// qml_bar.hpp's comment on why), and this just extends that same
+// Unlike checkWidgetWindow (a hard error on a stale window), a stale
+// *widget* -- its window still alive but the widget_id no longer
+// present -- is not an error: WidgetWindow's own setters already treat
+// an unknown widget_id as a silent no-op, and this just extends that
 // leniency one layer out.
-QmlBar* checkQmlWidgetBar(lua_State* L, int idx, int& out_widget_id) {
-    auto*   w      = static_cast<LuaQmlWidget*>(luaL_checkudata(L, idx, kQmlWidgetMeta));
+WidgetWindow* checkWidgetOwner(lua_State* L, int idx, int& out_widget_id) {
+    auto*   w = static_cast<LuaWidget*>(luaL_checkudata(L, idx, kWidgetMeta));
     Server* server = getServer(L);
-    auto    it     = server->qml_bars.find(w->bar_id);
-    if(it == server->qml_bars.end()) {
-        luaL_error(L, "uwu.qml: stale widget reference (bar already destroyed)");
+    auto    it     = server->widget_windows.find(w->window_id);
+    if(it == server->widget_windows.end()) {
+        luaL_error(
+            L, "uwu.widget: stale widget reference (window already destroyed)");
     }
     out_widget_id = w->widget_id;
     return it->second.get();
 }
 
-void pushQmlWidget(lua_State* L, int bar_id, int widget_id) {
-    auto* w      = static_cast<LuaQmlWidget*>(lua_newuserdata(L, sizeof(LuaQmlWidget)));
-    w->bar_id    = bar_id;
+void pushWidget(lua_State* L, int window_id, int widget_id) {
+    auto* w = static_cast<LuaWidget*>(lua_newuserdata(L, sizeof(LuaWidget)));
+    w->window_id = window_id;
     w->widget_id = widget_id;
-    luaL_getmetatable(L, kQmlWidgetMeta);
+    luaL_getmetatable(L, kWidgetMeta);
     lua_setmetatable(L, -2);
 }
 
-// uwu.qml.create({output=, position="top"/"bottom", height=}) -> QmlBar.
-// Same fields, same defaults, same output-resolution fallback chain as
-// uwu.bar.create() above -- see that function's comment.
-int l_qml_create(lua_State* L) {
+WidgetWindow::AnchorEdge parseEdge(lua_State* L, const char* s) {
+    std::string e = s;
+    if(e == "left") { return WidgetWindow::AnchorEdge::Left; }
+    if(e == "right") { return WidgetWindow::AnchorEdge::Right; }
+    if(e == "top") { return WidgetWindow::AnchorEdge::Top; }
+    if(e == "bottom") { return WidgetWindow::AnchorEdge::Bottom; }
+    if(e == "hcenter") { return WidgetWindow::AnchorEdge::HCenter; }
+    if(e == "vcenter") { return WidgetWindow::AnchorEdge::VCenter; }
+    luaL_error(L,
+               "uwu.widget: invalid anchor edge '%s' (want "
+               "left/right/top/bottom/hcenter/vcenter)",
+               s);
+    return WidgetWindow::AnchorEdge::None;  // unreachable
+}
+
+WidgetWindow::PopupAnchor parsePopupAnchor(lua_State* L, const std::string& s) {
+    if(s == "center") { return WidgetWindow::PopupAnchor::Center; }
+    if(s == "top") { return WidgetWindow::PopupAnchor::Top; }
+    if(s == "bottom") { return WidgetWindow::PopupAnchor::Bottom; }
+    if(s == "left") { return WidgetWindow::PopupAnchor::Left; }
+    if(s == "right") { return WidgetWindow::PopupAnchor::Right; }
+    if(s == "top-left") { return WidgetWindow::PopupAnchor::TopLeft; }
+    if(s == "top-right") { return WidgetWindow::PopupAnchor::TopRight; }
+    if(s == "bottom-left") { return WidgetWindow::PopupAnchor::BottomLeft; }
+    if(s == "bottom-right") { return WidgetWindow::PopupAnchor::BottomRight; }
+    luaL_error(L, "uwu.widget.window: invalid popup anchor '%s'", s.c_str());
+    return WidgetWindow::PopupAnchor::Center;  // unreachable
+}
+
+// Extracts an optional `parent` field from an options table at stack
+// index `table_idx` -- must be a uwu.Widget from this same window if
+// present, else 0 (window root). A parent from a different window is
+// a hard error (not a silent fallback): silently re-parenting into the
+// wrong window would place a widget somewhere the caller never
+// intended, with no diagnostic at all.
+int getOptionalParentField(lua_State* L, int table_idx, WidgetWindow* win) {
+    lua_getfield(L, table_idx, "parent");
+    if(lua_isnil(L, -1)) {
+        lua_pop(L, 1);
+        return 0;
+    }
+    auto* p = static_cast<LuaWidget*>(luaL_testudata(L, -1, kWidgetMeta));
+    if(!p) {
+        luaL_error(L, "uwu.widget: `parent` must be a uwu.Widget");
+        return 0;
+    }
+    if(p->window_id != win->id) {
+        luaL_error(L, "uwu.widget: `parent` belongs to a different window");
+        return 0;
+    }
+    int parent_id = p->widget_id;
+    lua_pop(L, 1);
+    return parent_id;
+}
+
+// uwu.widget.window({mode=, output=, position=/height= | anchor=/
+// margin=/width=/height=}) -> WidgetWindow. Same output-resolution
+// fallback chain as uwu.bar.create() -- see that function's comment.
+int l_widget_window_create(lua_State* L) {
     luaL_checktype(L, 1, LUA_TTABLE);
     Server* server = getServer(L);
 
     std::string output_name;
     bool        has_output = false;
     getOptionalField(L, 1, "output", output_name, has_output);
-
-    std::string position_str = "top";
-    bool        has_position = false;
-    getOptionalField(L, 1, "position", position_str, has_position);
-    BarPosition position =
-        (position_str == "bottom") ? BarPosition::Bottom : BarPosition::Top;
-
-    double height_d   = 30;
-    bool   has_height = false;
-    getOptionalField(L, 1, "height", height_d, has_height);
-    int height = static_cast<int>(height_d);
 
     Output* target = nullptr;
     if(has_output) {
@@ -2231,8 +2274,9 @@ int l_qml_create(lua_State* L) {
             }
         }
         if(!target) {
-            luaL_error(
-                L, "uwu.qml.create: no such output '%s'", output_name.c_str());
+            luaL_error(L,
+                       "uwu.widget.window: no such output '%s'",
+                       output_name.c_str());
             return 0;
         }
     } else {
@@ -2242,44 +2286,95 @@ int l_qml_create(lua_State* L) {
         }
     }
     if(!target) {
-        luaL_error(L, "uwu.qml.create: no output to attach to yet");
+        luaL_error(L, "uwu.widget.window: no output to attach to yet");
         return 0;
     }
 
-    auto bar = std::make_unique<QmlBar>(
-        *server, *target, position, height, *server->qt_runtime);
-    int id  = server->next_qml_bar_id++;
-    bar->id = id;
-    target->qml_bars.push_back(bar.get());
-    server->qml_bars.emplace(id, std::move(bar));
+    std::string mode_str = "bar";
+    bool        has_mode = false;
+    getOptionalField(L, 1, "mode", mode_str, has_mode);
 
-    // Same immediate re-sweep uwu.bar.create() does -- see that
-    // function's comment.
+    std::unique_ptr<WidgetWindow> win;
+
+    if(mode_str == "popup") {
+        std::string anchor_str = "center";
+        bool        has_anchor = false;
+        getOptionalField(L, 1, "anchor", anchor_str, has_anchor);
+        WidgetWindow::PopupAnchor anchor = parsePopupAnchor(L, anchor_str);
+
+        double margin_d   = 0;
+        bool   has_margin = false;
+        getOptionalField(L, 1, "margin", margin_d, has_margin);
+
+        double width_d = 0, height_d = 0;
+        bool   has_width = false, has_height = false;
+        getOptionalField(L, 1, "width", width_d, has_width);
+        getOptionalField(L, 1, "height", height_d, has_height);
+        if(!has_width || !has_height || width_d <= 0 || height_d <= 0) {
+            luaL_error(L,
+                       "uwu.widget.window: popup mode needs width and height");
+            return 0;
+        }
+
+        win = std::make_unique<WidgetWindow>(*server,
+                                             *target,
+                                             anchor,
+                                             static_cast<int>(margin_d),
+                                             static_cast<int>(width_d),
+                                             static_cast<int>(height_d));
+    } else {
+        std::string position_str = "top";
+        bool        has_position = false;
+        getOptionalField(L, 1, "position", position_str, has_position);
+        BarPosition position =
+            (position_str == "bottom") ? BarPosition::Bottom : BarPosition::Top;
+
+        double height_d   = 30;
+        bool   has_height = false;
+        getOptionalField(L, 1, "height", height_d, has_height);
+
+        win = std::make_unique<WidgetWindow>(
+            *server, *target, position, static_cast<int>(height_d));
+    }
+
+    int id  = server->next_widget_window_id++;
+    win->id = id;
+    target->widget_windows.push_back(win.get());
+    server->widget_windows.emplace(id, std::move(win));
+
     arrangeLayers(*target);
 
-    pushQmlBar(L, id);
+    pushWidgetWindow(L, id);
     return 1;
 }
 
-int l_qml_destroy(lua_State* L) {
-    QmlBar* bar    = checkQmlBar(L, 1);
-    int     id     = bar->id;
-    Output* output = bar->output;
-    if(bar->click_fn_ref != -2) {
-        luaL_unref(L, LUA_REGISTRYINDEX, bar->click_fn_ref);
+int l_widget_window_destroy(lua_State* L) {
+    WidgetWindow* win    = checkWidgetWindow(L, 1);
+    int           id     = win->id;
+    Output*       output = win->output;
+    if(win->click_fn_ref != -2) {
+        luaL_unref(L, LUA_REGISTRYINDEX, win->click_fn_ref);
     }
-    getServer(L)->qml_bars.erase(id);  // ~QmlBar() detaches from output itself
+    getServer(L)->widget_windows.erase(id);  // ~WidgetWindow() detaches itself
     if(output) { arrangeLayers(*output); }
     return 0;
 }
 
-// bar:rect({x=, y=, w=, h=, color=}) -> QmlWidget. Instantiated exactly
-// once here; every later change goes through widget:set_color()/
-// set_pos()/set_size() below, never a second rect() call for the same
-// visual element.
-int l_qml_rect(lua_State* L) {
-    QmlBar* bar = checkQmlBar(L, 1);
+int l_widget_window_show(lua_State* L) {
+    checkWidgetWindow(L, 1)->show();
+    return 0;
+}
+int l_widget_window_hide(lua_State* L) {
+    checkWidgetWindow(L, 1)->hide();
+    return 0;
+}
+
+// window:rect({x=, y=, w=, h=, color=, parent=}) -> Widget.
+int l_widget_rect(lua_State* L) {
+    WidgetWindow* win = checkWidgetWindow(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
+
+    int parent_id = getOptionalParentField(L, 2, win);
 
     int      x = 0, y = 0, w = 0, h = 0;
     uint32_t color      = 0x000000ffu;
@@ -2290,15 +2385,17 @@ int l_qml_rect(lua_State* L) {
     getOptionalField(L, 2, "h", h, has_unused);
     getOptionalField(L, 2, "color", color, has_unused);
 
-    int widget_id = bar->createRect(x, y, w, h, color);
-    pushQmlWidget(L, bar->id, widget_id);
+    int widget_id = win->createRect(parent_id, x, y, w, h, color);
+    pushWidget(L, win->id, widget_id);
     return 1;
 }
 
-// bar:text({x=, y=, text=, font_size=, color=}) -> QmlWidget.
-int l_qml_text(lua_State* L) {
-    QmlBar* bar = checkQmlBar(L, 1);
+// window:text({x=, y=, text=, font_size=, color=, parent=}) -> Widget.
+int l_widget_text(lua_State* L) {
+    WidgetWindow* win = checkWidgetWindow(L, 1);
     luaL_checktype(L, 2, LUA_TTABLE);
+
+    int parent_id = getOptionalParentField(L, 2, win);
 
     int         x = 0, y = 0, font_size = 14;
     std::string text;
@@ -2310,113 +2407,183 @@ int l_qml_text(lua_State* L) {
     getOptionalField(L, 2, "font_size", font_size, has_unused);
     getOptionalField(L, 2, "color", color, has_unused);
 
-    int widget_id = bar->createText(x, y, text, font_size, color);
-    pushQmlWidget(L, bar->id, widget_id);
+    int widget_id = win->createText(parent_id, x, y, text, font_size, color);
+    pushWidget(L, win->id, widget_id);
     return 1;
 }
 
-int l_qml_commit(lua_State* L) {
-    checkQmlBar(L, 1)->commit();
+int l_widget_commit(lua_State* L) {
+    checkWidgetWindow(L, 1)->commit();
     return 0;
 }
 
-int l_qml_on_click(lua_State* L) {
-    QmlBar* bar = checkQmlBar(L, 1);
+int l_widget_on_click(lua_State* L) {
+    WidgetWindow* win = checkWidgetWindow(L, 1);
     luaL_checktype(L, 2, LUA_TFUNCTION);
-    if(bar->click_fn_ref != -2) {
-        luaL_unref(L, LUA_REGISTRYINDEX, bar->click_fn_ref);
+    if(win->click_fn_ref != -2) {
+        luaL_unref(L, LUA_REGISTRYINDEX, win->click_fn_ref);
     }
     lua_pushvalue(L, 2);
-    bar->click_fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
+    win->click_fn_ref = luaL_ref(L, LUA_REGISTRYINDEX);
     return 0;
 }
 
-int l_qml_width(lua_State* L) {
-    lua_pushinteger(L, checkQmlBar(L, 1)->width);
+int l_widget_width(lua_State* L) {
+    lua_pushinteger(L, checkWidgetWindow(L, 1)->width);
     return 1;
 }
-int l_qml_height(lua_State* L) {
-    lua_pushinteger(L, checkQmlBar(L, 1)->height);
+int l_widget_height(lua_State* L) {
+    lua_pushinteger(L, checkWidgetWindow(L, 1)->height);
     return 1;
 }
 
-// widget:set_text(str) -- plain property poke, no re-parsing/
-// recreation (see qml_bar.hpp's own comment on why this is the whole
-// point of the retained-mode redesign).
-int l_qml_widget_set_text(lua_State* L) {
-    int         widget_id;
-    QmlBar*     bar  = checkQmlWidgetBar(L, 1, widget_id);
-    const char* text = luaL_checkstring(L, 2);
-    bar->setText(widget_id, text);
+int l_widget_set_text(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win  = checkWidgetOwner(L, 1, widget_id);
+    const char*   text = luaL_checkstring(L, 2);
+    win->setText(widget_id, text);
     return 0;
 }
 
-int l_qml_widget_set_color(lua_State* L) {
-    int      widget_id;
-    QmlBar*  bar   = checkQmlWidgetBar(L, 1, widget_id);
-    uint32_t color = static_cast<uint32_t>(luaL_checkinteger(L, 2));
-    bar->setColor(widget_id, color);
+int l_widget_set_color(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win   = checkWidgetOwner(L, 1, widget_id);
+    uint32_t      color = static_cast<uint32_t>(luaL_checkinteger(L, 2));
+    win->setColor(widget_id, color);
     return 0;
 }
 
-int l_qml_widget_set_pos(lua_State* L) {
-    int     widget_id;
-    QmlBar* bar = checkQmlWidgetBar(L, 1, widget_id);
-    int     x   = static_cast<int>(luaL_checkinteger(L, 2));
-    int     y   = static_cast<int>(luaL_checkinteger(L, 3));
-    bar->setPos(widget_id, x, y);
+int l_widget_set_pos(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win = checkWidgetOwner(L, 1, widget_id);
+    int           x   = static_cast<int>(luaL_checkinteger(L, 2));
+    int           y   = static_cast<int>(luaL_checkinteger(L, 3));
+    win->setPos(widget_id, x, y);
     return 0;
 }
 
-int l_qml_widget_set_size(lua_State* L) {
-    int     widget_id;
-    QmlBar* bar = checkQmlWidgetBar(L, 1, widget_id);
-    int     w   = static_cast<int>(luaL_checkinteger(L, 2));
-    int     h   = static_cast<int>(luaL_checkinteger(L, 3));
-    bar->setSize(widget_id, w, h);
+int l_widget_set_size(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win = checkWidgetOwner(L, 1, widget_id);
+    int           w   = static_cast<int>(luaL_checkinteger(L, 2));
+    int           h   = static_cast<int>(luaL_checkinteger(L, 3));
+    win->setSize(widget_id, w, h);
     return 0;
 }
 
-const luaL_Reg kQmlBarMethods[] = {
-    {"rect",     l_qml_rect    },
-    {"text",     l_qml_text    },
-    {"commit",   l_qml_commit  },
-    {"on_click", l_qml_on_click},
-    {"destroy",  l_qml_destroy },
-    {"width",    l_qml_width   },
-    {"height",   l_qml_height  },
-    {nullptr,    nullptr       },
+// widget:anchor(my_edge, target, target_edge, margin) -- target is
+// nil (this widget's own parent) or another uwu.Widget from the same
+// window.
+int l_widget_anchor(lua_State* L) {
+    int                      widget_id;
+    WidgetWindow*            win     = checkWidgetOwner(L, 1, widget_id);
+    WidgetWindow::AnchorEdge my_edge = parseEdge(L, luaL_checkstring(L, 2));
+
+    int target_id = 0;
+    if(!lua_isnoneornil(L, 3)) {
+        auto* t = static_cast<LuaWidget*>(luaL_checkudata(L, 3, kWidgetMeta));
+        if(t->window_id != win->id) {
+            luaL_error(
+                L, "uwu.widget: anchor target belongs to a different window");
+            return 0;
+        }
+        target_id = t->widget_id;
+    }
+    WidgetWindow::AnchorEdge target_edge = parseEdge(L, luaL_checkstring(L, 4));
+    int margin = static_cast<int>(luaL_optinteger(L, 5, 0));
+
+    win->setAnchor(widget_id, my_edge, target_id, target_edge, margin);
+    return 0;
+}
+
+int l_widget_clear_anchor(lua_State* L) {
+    int                      widget_id;
+    WidgetWindow*            win     = checkWidgetOwner(L, 1, widget_id);
+    WidgetWindow::AnchorEdge my_edge = parseEdge(L, luaL_checkstring(L, 2));
+    win->clearAnchor(widget_id, my_edge);
+    return 0;
+}
+
+int l_widget_clear_anchors(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win = checkWidgetOwner(L, 1, widget_id);
+    win->clearAnchors(widget_id);
+    return 0;
+}
+
+// widget:anchor_fill(target, margin) -- target nil == this widget's
+// own parent.
+int l_widget_anchor_fill(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win       = checkWidgetOwner(L, 1, widget_id);
+    int           target_id = 0;
+    if(!lua_isnoneornil(L, 2)) {
+        auto* t = static_cast<LuaWidget*>(luaL_checkudata(L, 2, kWidgetMeta));
+        if(t->window_id != win->id) {
+            luaL_error(L,
+                       "uwu.widget: fill target belongs to a different window");
+            return 0;
+        }
+        target_id = t->widget_id;
+    }
+    int margin = static_cast<int>(luaL_optinteger(L, 3, 0));
+    win->setFill(widget_id, target_id, margin);
+    return 0;
+}
+
+int l_widget_clear_fill(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win = checkWidgetOwner(L, 1, widget_id);
+    win->clearFill(widget_id);
+    return 0;
+}
+
+const luaL_Reg kWidgetWindowMethods[] = {
+    {"rect",     l_widget_rect          },
+    {"text",     l_widget_text          },
+    {"commit",   l_widget_commit        },
+    {"on_click", l_widget_on_click      },
+    {"destroy",  l_widget_window_destroy},
+    {"width",    l_widget_width         },
+    {"height",   l_widget_height        },
+    {"show",     l_widget_window_show   },
+    {"hide",     l_widget_window_hide   },
+    {nullptr,    nullptr                },
 };
 
-const luaL_Reg kQmlWidgetMethods[] = {
-    {"set_text",  l_qml_widget_set_text },
-    {"set_color", l_qml_widget_set_color},
-    {"set_pos",   l_qml_widget_set_pos  },
-    {"set_size",  l_qml_widget_set_size },
-    {nullptr,     nullptr               },
+const luaL_Reg kWidgetMethods[] = {
+    {"set_text",      l_widget_set_text     },
+    {"set_color",     l_widget_set_color    },
+    {"set_pos",       l_widget_set_pos      },
+    {"set_size",      l_widget_set_size     },
+    {"anchor",        l_widget_anchor       },
+    {"clear_anchor",  l_widget_clear_anchor },
+    {"clear_anchors", l_widget_clear_anchors},
+    {"anchor_fill",   l_widget_anchor_fill  },
+    {"clear_fill",    l_widget_clear_fill   },
+    {nullptr,         nullptr               },
 };
 
-const luaL_Reg kQmlFuncs[] = {
-    {"create", l_qml_create},
-    {nullptr,  nullptr     },
+const luaL_Reg kWidgetNamespaceFuncs[] = {
+    {"window", l_widget_window_create},
+    {nullptr,  nullptr               },
 };
 
-void registerQmlBarMetatable(lua_State* L) {
-    luaL_newmetatable(L, kQmlBarMeta);
+void registerWidgetWindowMetatable(lua_State* L) {
+    luaL_newmetatable(L, kWidgetWindowMeta);
     lua_pushvalue(L, -1);
     lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, kQmlBarMethods, 0);
+    luaL_setfuncs(L, kWidgetWindowMethods, 0);
     lua_pop(L, 1);
 }
 
-void registerQmlWidgetMetatable(lua_State* L) {
-    luaL_newmetatable(L, kQmlWidgetMeta);
+void registerWidgetMetatable(lua_State* L) {
+    luaL_newmetatable(L, kWidgetMeta);
     lua_pushvalue(L, -1);
     lua_setfield(L, -2, "__index");
-    luaL_setfuncs(L, kQmlWidgetMethods, 0);
+    luaL_setfuncs(L, kWidgetMethods, 0);
     lua_pop(L, 1);
 }
-
 
 // uwu.wallpaper.set(name, {path=, mode=}) -- name is an output name or
 // "*" for every output not otherwise matched by a more specific rule,
@@ -3047,8 +3214,8 @@ void LuaConfig::init(Server& server) {
     // slot on `uwu` itself.
     registerClientMetatable(L);
     registerBarMetatable(L);
-    registerQmlBarMetatable(L);
-    registerQmlWidgetMetatable(L);
+    registerWidgetWindowMetatable(L);
+    registerWidgetMetatable(L);
 
     lua_newtable(L);
     luaL_setfuncs(L, kuwuwmFuncs, 0);
@@ -3080,8 +3247,8 @@ void LuaConfig::init(Server& server) {
     lua_setfield(L, -2, "bar");
 
     lua_newtable(L);
-    luaL_setfuncs(L, kQmlFuncs, 0);
-    lua_setfield(L, -2, "qml");
+    luaL_setfuncs(L, kWidgetNamespaceFuncs, 0);
+    lua_setfield(L, -2, "widget");
 
     lua_newtable(L);
     luaL_setfuncs(L, kTagFuncs, 0);
@@ -3359,12 +3526,12 @@ int timerTrampoline(void* data) {
 }  // namespace
 
 int LuaConfig::addTimer(int fn_ref, int delay_ms, int interval_ms) {
-    auto timer          = std::make_unique<LuaTimer>();
-    timer->config       = this;
-    timer->fn_ref       = fn_ref;
-    timer->interval_ms  = interval_ms;
-    timer->id           = next_timer_id++;
-    int id              = timer->id;
+    auto timer         = std::make_unique<LuaTimer>();
+    timer->config      = this;
+    timer->fn_ref      = fn_ref;
+    timer->interval_ms = interval_ms;
+    timer->id          = next_timer_id++;
+    int id             = timer->id;
 
     wl_event_loop* loop = wl_display_get_event_loop(server_->display);
     timer->source = wl_event_loop_add_timer(loop, timerTrampoline, timer.get());
@@ -3456,9 +3623,9 @@ bool LuaConfig::reload() {
         // (which survived because old_L is being restored, not closed)
         // comes back.
         timers.clear();
-        timers          = std::move(old_timers);
-        next_hook_id    = old_next_hook_id;
-        settings        = old_settings;
+        timers       = std::move(old_timers);
+        next_hook_id = old_next_hook_id;
+        settings     = old_settings;
         wlr_log(WLR_ERROR,
                 "rc.lua reload failed, keeping previous config running");
     }

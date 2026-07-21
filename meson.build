@@ -68,28 +68,6 @@ endif
 freetype_dep = dependency('freetype2')
 harfbuzz_dep = dependency('harfbuzz')
 
-# GMainLoop is the master loop Server::run() drives (see glib_loop.hpp)
-# instead of wl_display_run() -- needed so embedded QtQuick's
-# QPAEventDispatcherGlib has a running GMainContext to attach
-# timers/animations to. wl_event_loop itself is unchanged; only what
-# iterates it is.
-glib_dep = dependency('glib-2.0')
-
-# uwu.qml.* (qml_bar.cpp/qt_runtime.cpp) -- QtQuick's own scenegraph +
-# QML engine, rendered offscreen via the QSG software backend
-# (QQuickWindow::grabWindow(), no GL/EGL -- see qt_runtime.cpp's
-# QT_QUICK_BACKEND comment) and uploaded through the same
-# wlr_scene_buffer path Bar (bar.cpp) already uses. Plain dependency()
-# calls, not meson's qt6 module: nothing in this codebase defines a
-# Q_OBJECT-derived class of its own, so there's no moc step to wire up
-# -- only real Qt headers/libs are needed, matching the rest of this
-# file's plain pkg-config style. No Qt6OpenGL dependency: this render
-# path never touches QOpenGLContext/QOffscreenSurface/FBOs.
-qt_core_dep = dependency('Qt6Core')
-qt_gui_dep = dependency('Qt6Gui')
-qt_qml_dep = dependency('Qt6Qml')
-qt_quick_dep = dependency('Qt6Quick')
-
 deps = [
     wlroots_dep,
     wayland_server_dep,
@@ -100,11 +78,6 @@ deps = [
     lua_dep,
     freetype_dep,
     harfbuzz_dep,
-    glib_dep,
-    qt_core_dep,
-    qt_gui_dep,
-    qt_qml_dep,
-    qt_quick_dep,
 ]
 
 # ── C++-incompatible wlroots headers ────────────────────────────────────
@@ -180,8 +153,7 @@ src = files(
     'src/layout.cpp',
     'src/text.cpp',
     'src/bar.cpp',
-    'src/qml_bar.cpp',
-    'src/qt_runtime.cpp',
+    'src/widget.cpp',
     'src/lua_config.cpp',
 )
 
@@ -196,7 +168,7 @@ executable(
     protocols_src,
     include_directories: inc,
     dependencies: deps,
-    cpp_args: patched_inc_args,
+    cpp_args: patched_inc_args + ['-Wno-keyword-macro'],
     c_args: patched_inc_args,
     link_args: ['-Wl,--as-needed'],
     install: false,

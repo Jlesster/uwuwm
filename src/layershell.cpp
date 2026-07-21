@@ -6,7 +6,7 @@ extern "C" {
 }
 
 #include "bar.hpp"
-#include "qml_bar.hpp"
+#include "widget.hpp"
 #include "layout.hpp"
 #include "output.hpp"
 #include "popup.hpp"
@@ -134,11 +134,15 @@ void arrangeLayers(Output& output) {
         bar->reposition();
     }
 
-    // Same accounting, same reasoning, for uwu.qml.create()'d bars --
+    // Same accounting, same reasoning, for uwu.widget.create()'d bars --
     // see the comment above this loop's Bar counterpart.
-    for(QmlBar* bar : output.qml_bars) {
+    for(WidgetWindow* bar : output.widget_windows) {
         if(bar->height <= 0) { continue; }
-        if(bar->position == BarPosition::Top) {
+        // WidgetWindow has both Bar and Popup flavors -- only the Bar
+        // ones participate in edge-anchored usable-area accounting.
+        // Popups float by screen anchor, never claim exclusive space.
+        if(bar->mode != WidgetWindow::Mode::Bar) { continue; }
+        if(bar->bar_position == BarPosition::Top) {
             usable.y += bar->height;
             usable.height -= bar->height;
         } else {

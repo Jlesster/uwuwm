@@ -101,14 +101,14 @@ struct Output {
     // and stack correctly if both are present on the same edge.
     std::vector<struct Bar*> bars;
 
-    // uwu.qml.create()'d bars (qml_bar.hpp) anchored to this output --
-    // same non-owning contract as `bars` above (Server::qml_bars is the
+    // uwu.widget.create()'d bars (qml_bar.hpp) anchored to this output --
+    // same non-owning contract as `bars` above (Server::widget_windows is the
     // owner), kept as its own vector rather than folded into `bars`
-    // since QmlBar and Bar share no common base (see qml_bar.hpp's own
+    // since WidgetWindow and Bar share no common base (see qml_bar.hpp's own
     // comment for why). arrangeLayers() folds these into usable_box
     // the same way it already does for `bars` and client layer-shell
     // exclusive zones.
-    std::vector<class QmlBar*> qml_bars;
+    std::vector<class WidgetWindow*> widget_windows;
 
     // Animated tag/workspace switch: enables both the outgoing and
     // incoming tagset's views simultaneously and slides them past each
@@ -137,7 +137,18 @@ private:
     void handleRequestState(wlr_output_event_request_state* event);
     void handleDestroy();
 
-    wl_listener frame_listener{};
+    // Hot path: the per-output frame callback runs every vsync, so this
+    // stays a raw `wl_listener` + raw pointer, not a Listener<T> (which
+    // would cost a std::function indirection per frame) and not a
+    // wl_container_of() (which would invoke offsetof on this non-
+    // standard-layout struct, see the FrameListener definition in
+    // output.cpp). The trampoline is a static Output member, the listener
+    // struct lives alongside this Output on the heap, and the listener
+    // address doubles as the FrameListener* -- same trick Listener<>
+    // uses (listener.hpp:63). Declared via the fwd-declared FrameListener
+    // type defined in output.cpp; the destructor there owns the cleanup.
+    struct FrameListener;
+    std::unique_ptr<FrameListener> frame_listener;
     static void frameTrampoline(wl_listener* listener, void* data);
 
     Listener<wlr_output_event_request_state> request_state;

@@ -21,6 +21,7 @@ extern "C" {
 #include "bar.hpp"
 #include "lua_config.hpp"
 #include "output.hpp"
+#include "widget.hpp"
 #include "server.hpp"
 #include "view.hpp"
 
@@ -104,9 +105,58 @@ Bar* barAt(Server& server, double lx, double ly, int* local_x, int* local_y) {
     if(wlr_scene_surface_try_from_buffer(scene_buffer)) { return nullptr; }
     if(!node->data) { return nullptr; }
 
+    // Bar::reposition() and WidgetWindow::reposition() both tag their own
+    // scene node's .data with `this`, using the identical convention
+    // (see either function's comment) -- but Bar and WidgetWindow are two
+    // unrelated types (no common base, by design -- see qml_bar.hpp).
+    // A hit on a WidgetWindow's node lands here too, and blindly trusting
+    // node->data as a Bar* for one would read a WidgetWindow's memory
+    // through the wrong type -- confirm actual membership in
+    // server.bars first, same as desktopViewAt above disambiguates
+    // View from LayerSurface by checking which list owns a scene_tree.
+    void* candidate = node->data;
+    bool  is_bar    = false;
+    for(auto& [id, b] : server.bars) {
+        if(b.get() == candidate) {
+            is_bar = true;
+            break;
+        }
+    }
+    if(!is_bar) { return nullptr; }
+
     *local_x = static_cast<int>(sx);
     *local_y = static_cast<int>(sy);
-    return static_cast<Bar*>(node->data);
+    return static_cast<Bar*>(candidate);
+}
+
+// Same hit-test as barAt() above, for a uwu.widget.create()'d WidgetWindow
+// instead -- see barAt()'s own comment for why the membership check
+// (against server.widget_windows here, not server.bars) is required rather
+// than optional.
+WidgetWindow* widgetWindowAt(Server& server, double lx, double ly, int* local_x,
+                 int* local_y) {
+    double          sx = 0, sy = 0;
+    wlr_scene_node* node =
+        wlr_scene_node_at(&server.scene->tree.node, lx, ly, &sx, &sy);
+    if(!node || node->type != WLR_SCENE_NODE_BUFFER) { return nullptr; }
+
+    wlr_scene_buffer* scene_buffer = wlr_scene_buffer_from_node(node);
+    if(wlr_scene_surface_try_from_buffer(scene_buffer)) { return nullptr; }
+    if(!node->data) { return nullptr; }
+
+    void* candidate = node->data;
+    bool  is_qml_bar = false;
+    for(auto& [id, b] : server.widget_windows) {
+        if(b.get() == candidate) {
+            is_qml_bar = true;
+            break;
+        }
+    }
+    if(!is_qml_bar) { return nullptr; }
+
+    *local_x = static_cast<int>(sx);
+    *local_y = static_cast<int>(sy);
+    return static_cast<WidgetWindow*>(candidate);
 }
 
 // Finds the View wrapping a given wlr_surface, or nullptr if it isn't one
@@ -708,6 +758,14 @@ void setupCursor(Server& server) {
                 if(bar->click_fn_ref != -2) {
                     server.lua_cfg.invokeBarClick(
                         bar->click_fn_ref, bar_x, bar_y, event->button);
+                }
+                return;
+            }
+            if(WidgetWindow* qml_bar = widgetWindowAt(server, server.cursor->x,
+                                          server.cursor->y, &bar_x, &bar_y)) {
+                if(qml_bar->click_fn_ref != -2) {
+                    server.lua_cfg.invokeBarClick(
+                        qml_bar->click_fn_ref, bar_x, bar_y, event->button);
                 }
                 return;
             }

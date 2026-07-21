@@ -8,7 +8,7 @@ extern "C" {
 }
 
 #include "bar.hpp"
-#include "qml_bar.hpp"
+#include "widget.hpp"
 #include "dwindle.hpp"
 #include "idle.hpp"
 #include "layershell.hpp"
@@ -137,6 +137,25 @@ const MonitorRule* findMonitorRule(Server& server, const char* name) {
     return wildcard;
 }
 
+// Hot-path frame-callback listener: a standard-layout struct that pairs
+// the wl_listener wlroots wants with a back-pointer to the Output that
+// owns it. Lives on the heap (see Output::frame_listener in output.hpp)
+// so its address is stable across moves. The trampoline gets the
+// wl_listener* from wlroots and reinterpret_casts back to FrameListener*,
+// which is safe because the wl_listener is the FrameListener's first
+// member -- same layout trick listener.hpp's Listener<> uses (line 63).
+//
+// Why this exists: Output is non-standard-layout (it owns a unique_ptr
+// and a std::list, which would prevent the `offsetof` call inside
+// wl_container_of from compiling cleanly under -Winvalid-offsetof), and
+// routing the per-vsync frame callback through the generic Listener<T>
+// would cost a std::function indirection on every frame. Owning a tiny
+// POD struct keeps both costs off the table.
+struct Output::FrameListener {
+    wl_listener listener;
+    Output*     output;
+};
+
 Output::Output(Server& server, struct wlr_output* wlr_output)
     : server(server), wlr_output(wlr_output) {
     wlr_output->data = this;
@@ -222,10 +241,13 @@ Output::Output(Server& server, struct wlr_output* wlr_output)
     applyWallpaper(*this);
 
     // Hot path: raw notify, no Listener<T> wrapper. See listener.hpp's
-    // header comment and the doc's §2.1 for why this one callback is
-    // different from every other one in the codebase.
-    frame_listener.notify = &Output::frameTrampoline;
-    wl_signal_add(&wlr_output->events.frame, &frame_listener);
+    // header comment, the doc's §2.1, and the FrameListener comment
+    // above for why this one callback is different from every other one
+    // in the codebase.
+    frame_listener         = std::make_unique<FrameListener>();
+    frame_listener->output = this;
+    frame_listener->listener.notify = &Output::frameTrampoline;
+    wl_signal_add(&wlr_output->events.frame, &frame_listener->listener);
 
     request_state.connect(&wlr_output->events.request_state,
                           [this](wlr_output_event_request_state* event) {
@@ -250,7 +272,8 @@ Output::Output(Server& server, struct wlr_output* wlr_output)
 }
 
 Output::~Output() {
-    wl_list_remove(&frame_listener.link);
+    wl_list_remove(&frame_listener->listener.link);
+    frame_listener.reset();
 
     // Unlike background_rect (never explicitly destroyed -- it lives
     // under a shared layer_tree that outlives any one Output, and letting
@@ -271,9 +294,9 @@ Output::~Output() {
     // here, same as an unplugged monitor's windows don't get destroyed,
     // just detached/refocused elsewhere.
     for(Bar* bar : bars) { bar->detachFromOutput(); }
-    // Same treatment, same reasoning, for uwu.qml.create()'d bars --
+    // Same treatment, same reasoning, for uwu.widget.create()'d bars --
     // see the comment directly above.
-    for(QmlBar* bar : qml_bars) { bar->detachFromOutput(); }
+    for(WidgetWindow* bar : widget_windows) { bar->detachFromOutput(); }
 
     // Unlike background_rect (never explicitly destroyed -- it lives
     // under a shared layer_tree that outlives any one Output, and letting
@@ -342,8 +365,12 @@ void Output::updateBackground() {
 }
 
 void Output::frameTrampoline(wl_listener* listener, void* /*data*/) {
-    Output* self = wl_container_of(listener, self, frame_listener);
-    self->handleFrame();
+    // wl_listener is the first member of FrameListener, so the pointer
+    // wlroots hands us is the FrameListener* itself. Reinterpret, no
+    // offsetof, no UB -- standard-layout + first-member-identity is the
+    // contract.
+    auto* fl = reinterpret_cast<FrameListener*>(listener);
+    fl->output->handleFrame();
 }
 
 void Output::handleFrame() {

@@ -21,7 +21,6 @@ extern "C" {
 #include <wlr/util/box.h>
 }
 
-#include "glib_loop.hpp"
 #include "listener.hpp"
 #include "lua_config.hpp"
 #include "text.hpp"
@@ -37,8 +36,7 @@ struct View;
 struct Popup;
 struct LayerSurface;
 struct Bar;
-class QmlBar;
-class QtRuntime;
+class WidgetWindow;
 struct Keyboard;
 struct InputDevice;
 struct wlr_layer_shell_v1;
@@ -85,11 +83,10 @@ public:
     Server(const Server&)            = delete;
     Server& operator=(const Server&) = delete;
 
-    int run(int argc, char** argv);
+    int run();
 
     void requestQuit() {
         if(display) { wl_display_terminate(display); }
-        if(main_loop) { g_main_loop_quit(main_loop); }
     }
 
     LuaConfig lua_cfg;
@@ -100,26 +97,6 @@ public:
     TextRenderer text_renderer;
 
     wl_display*                  display              = nullptr;
-
-    // The master loop Server::run() drives via g_main_loop_run(),
-    // replacing the old direct wl_display_run(display) call. Created
-    // in setup() (has to exist before onSignal/requestQuit can
-    // reference it), unref'd in ~Server(). See glib_loop.hpp's comment
-    // for why this exists.
-    GMainLoop* main_loop = nullptr;
-
-    // Wraps display's wl_event_loop in a GSource so Server::run() can
-    // drive it via g_main_loop_run() instead of wl_display_run(). Only
-    // reason this exists: embedding Qt/QtQuick (bar QML rendering)
-    // needs *some* running GMainContext for QPAEventDispatcherGlib to
-    // attach timers/animations to -- see glib_loop.hpp's header
-    // comment. Every wl_event_loop_add_timer/add_signal/add_fd call
-    // elsewhere in this file is completely unaffected; only what
-    // iterates the loop changes. Constructed in setup() once `display`
-    // exists, destroyed implicitly by ~Server() (declared after
-    // display so it tears down first, before display itself is
-    // destroyed).
-    std::unique_ptr<GlibEventLoop> glib_loop;
 
     // wl_display_add_socket_auto()'s return value, from setup(), held
     // here until startBackend() runs (deferred -- see that function's
@@ -287,33 +264,15 @@ public:
     std::unordered_map<int, std::unique_ptr<Bar>> bars;
     int                                            next_bar_id = 1;
 
-    // uwu.qml.create()'d bars (qml_bar.hpp) -- same ownership/lifetime
+    // uwu.widget.create()'d bars (qml_bar.hpp) -- same ownership/lifetime
     // contract as `bars` above (survives reloads, explicit destroy()
     // only). Kept as a separate map/id-space rather than folded into
-    // `bars` itself: Bar and QmlBar are two different concrete types
+    // `bars` itself: Bar and WidgetWindow are two different concrete types
     // with no common base, matching how bar.hpp's Bar has no
     // polymorphism to retrofit either -- see qml_bar.hpp's own comment
     // for why.
-    std::unordered_map<int, std::unique_ptr<QmlBar>> qml_bars;
-    int                                                next_qml_bar_id = 1;
-
-    // Exactly one QGuiApplication may exist per process (Qt's own
-    // requirement) and every QmlBar needs *a* running one for
-    // QPAEventDispatcherGlib to attach to (see glib_loop.hpp), plus one
-    // shared QQmlEngine (constructing one per-bar would pay QML's
-    // type-system/JS-engine startup cost redundantly for no benefit) --
-    // so Server owns exactly one of each, constructed in setup() and
-    // shared by every QmlBar thereafter.
-    //
-    // Wrapped in QtRuntime (qt_runtime.hpp) rather than held directly
-    // as std::unique_ptr<QGuiApplication>/<QQmlEngine>: those two
-    // headers pull in Qt's `signals`/`slots`/`emit` macros, a real,
-    // documented source of collisions with unrelated code, and
-    // server.hpp/server.cpp are two of the last places in this codebase
-    // that should be exposed to that risk. QtRuntime's own header is
-    // Qt-header-free (pimpl); only qt_runtime.cpp and qml_bar.cpp ever
-    // see the real Qt includes.
-    std::unique_ptr<QtRuntime> qt_runtime;
+    std::unordered_map<int, std::unique_ptr<WidgetWindow>> widget_windows;
+    int                                                next_widget_window_id = 1;
 
     // Handed out sequentially to View::id at construction (see
     // view.hpp) -- never reused within one run, so an IPC client
@@ -415,17 +374,12 @@ public:
     VoidListener                                cursor_frame;
 
 private:
-    // argc/argv threaded through from run() (originally main()) purely
-    // for QGuiApplication's constructor, which keeps a reference to
-    // argc and expects both to stay valid for as long as it exists --
-    // main()'s locals outlive that easily, but setup() taking no
-    // arguments before had nothing that needed them.
-    bool setup(int argc, char** argv);
+    bool setup();
     // Split out of setup() deliberately -- see the long comment at this
-    // function's call site in run() for why wlr_backend_start() (and
-    // everything downstream of the outputs it creates, including any
-    // uwu.qml.create() a monitor_connected hook fires) must not run
-    // until g_main_loop_run() is already pumping glib_loop's GSource.
+    // function's own definition in server.cpp for why
+    // wlr_backend_start() (and everything downstream of the outputs it
+    // creates) is deferred to the event loop's first idle dispatch
+    // rather than called here inline.
     bool startBackend();
     void spawnAutostart();
 
