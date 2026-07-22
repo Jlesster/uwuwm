@@ -541,16 +541,15 @@ function uwu.timer.cancel(id) end
 
 -- ── bar ──────────────────────────────────────────────────────────────
 -- A `uwu.Bar` is a low-level pixel buffer you draw rects and glyphs
--- into, then commit. It's the same surface a QML bar would draw on,
--- just without the QML part. Most users want the higher-level
--- `uwu.widget.window` below -- a retained-mode rect/text API on top
--- of one of these bars, with anchoring between widgets and parent /
--- child nesting, so the rest of this file after the bar section is
--- what new code should reach for. uwu.bar.* stays public because
--- (a) anything uwu.widget can't do -- custom glyph rendering, a
--- 1-pixel-tall scratch buffer, direct pixel poking for video
--- previews -- still needs it, and (b) a port from the old QML bar
--- doesn't have to change its draw calls.
+-- into, then commit -- immediate mode: nothing persists between
+-- commits except what you explicitly redraw. Most users want the
+-- higher-level `uwu.widget.window` below -- a retained-mode rect/text
+-- API with anchoring between widgets and parent/child nesting, so the
+-- widget section after this one is what new code should reach for.
+-- uwu.bar.* stays public for the cases uwu.widget genuinely can't
+-- cover: custom glyph rendering with an arbitrary font_path per call,
+-- a 1-pixel-tall scratch buffer, or direct pixel poking for something
+-- like a video preview.
 
 ---@class uwu.bar
 uwu.bar = {}
@@ -674,15 +673,19 @@ function Bar:destroy() end
 ---@class uwu.widget
 uwu.widget = {}
 
----@class uwu.WidgetWindowOpts
+---@class uwu.WidgetBarOpts
 ---@field output? string  Output name; defaults to the currently focused one.
----@field mode? "bar"|"popup"  Defaults to "bar".
----@field position? "top"|"bottom"  Bar mode only. Defaults to "top".
----@field height? integer  Bar mode only, pixels. Defaults to 30.
----@field anchor? "center"|"top"|"bottom"|"left"|"right"|"topleft"|"topright"|"bottomleft"|"bottomright"  Popup mode only. Defaults to "center".
----@field margin? integer  Popup mode only, pixels from the screen edge / center. Defaults to 0.
----@field width? integer  Popup mode only, required.
----@field height? integer  Popup mode only, required (this field is named the same as the bar-mode one, but they're independent -- see the lua_config.cpp source for the exact field the constructor reads in each branch).
+---@field mode? "bar"  Defaults to "bar" if omitted entirely.
+---@field position? "top"|"bottom"  Defaults to "top".
+---@field height? integer  Pixels; defaults to 30.
+
+---@class uwu.WidgetPopupOpts
+---@field output? string  Output name; defaults to the currently focused one.
+---@field mode "popup"
+---@field anchor? "center"|"top"|"bottom"|"left"|"right"|"top-left"|"top-right"|"bottom-left"|"bottom-right"  Defaults to "center".
+---@field margin? integer  Pixels from the screen edge/center; defaults to 0.
+---@field width integer  Required -- no natural default for a floating popup's width.
+---@field height integer  Required -- no natural default for a floating popup's height.
 
 ---Creates a widget window. Bar-mode windows claim their exclusive
 ---zone immediately (tiled windows on that output shrink to make room
@@ -691,7 +694,7 @@ uwu.widget = {}
 ---`wlr_scene_node_set_enabled` toggles -- no create/destroy churn,
 ---so a single popup can be re-shown over and over. Survives
 ---uwu.reload() (only :destroy() removes it).
----@param opts uwu.WidgetWindowOpts
+---@param opts uwu.WidgetBarOpts|uwu.WidgetPopupOpts
 ---@return uwu.WidgetWindow
 function uwu.widget.window(opts) end
 
@@ -795,22 +798,43 @@ function Widget:set_text(text) end
 ---@param color integer
 function Widget:set_color(color) end
 
----Sets this widget's parent-relative position, replacing any
----previous (x, y) and un-setting any anchor lines on the same
----axis. (Setting left/right anchors afterwards resumes anchoring;
----x/y from anchors and x/y from set_pos are mutually exclusive per
----axis, with anchors taking priority.) Nothing is repainted until
----:commit().
+---Sets this widget's parent-relative (x, y). Only takes visible
+---effect on an axis that has no anchor line set -- an anchor, once
+---set on an axis (via :anchor), always takes priority over plain x/y
+---on that axis, on every :commit(), regardless of whether set_pos was
+---called more recently. Call :clear_anchor()/:clear_anchors() first if
+---you want set_pos to actually move an anchored widget. Nothing is
+---repainted until the owning window's :commit().
 ---@param x integer
 ---@param y integer
 function Widget:set_pos(x, y) end
 
----Sets this widget's size. Ignored for text widgets (text measures
----its own natural size from the font). Nothing is repainted until
+---Sets this widget's box size directly. For a Rect this is exactly
+---what gets painted. For a Text widget this does *not* change what
+---gets drawn -- text always renders at its natural glyph size -- it
+---only overrides the w/h another widget's :anchor() would read from
+---this one as a target; a subsequent :set_text() call recomputes
+---width (not height) from the new content regardless, so an override
+---here doesn't survive a text change. Nothing is repainted until
 ---:commit().
 ---@param w integer
 ---@param h integer
 function Widget:set_size(w, h) end
+
+---This widget's measured width. For a Rect this is whatever
+---set_size() last set; for a Text widget it's the auto-measured text
+---width from the most recent :commit(). Reading this is the natural
+---way to size a sibling widget to wrap this one -- e.g. a pill rect
+---that should hug its label's text. The value is whatever the last
+---:commit() used to paint, not whatever is queued for the next one.
+---@return integer
+function Widget:width() end
+
+---This widget's measured height. Same story as :width(): Rect is
+---set_size(), Text is the auto-measured ascent+descent from the last
+---:commit().
+---@return integer
+function Widget:height() end
 
 ---@alias uwu.WidgetEdge "left"|"right"|"top"|"bottom"|"hcenter"|"vcenter"
 
@@ -840,16 +864,24 @@ function Widget:clear_anchor(my_edge) end
 function Widget:clear_anchors() end
 
 ---Sets this widget's box to fully cover `target`'s box (or this
----widget's own parent, if target is nil) inset by `margin` on all
----four sides. The one widget "shape" allowed to resize itself via
----anchoring -- the others only move. Calling this unsets any
----previous :set_size and any left/right/top/bottom anchor lines
----(hcenter/vcenter stay, they're position-only). Nothing is
----repositioned until :commit().
+---widget's own parent, if target is nil), inset by `margin` on all
+---four sides -- recomputed fresh every :commit(). The one widget
+---shape allowed to resize itself via anchoring. While active, this
+---takes priority over *all six* anchor lines (left/right/top/bottom/
+---hcenter/vcenter alike -- not just the box-shape ones) and over
+---set_size, all of which are simply not consulted rather than
+---cleared -- see Widget:clear_fill for what that means when you turn
+---fill back off. Nothing is repainted until :commit().
 ---@param target? uwu.Widget
 ---@param margin? integer  Defaults to 0.
 function Widget:anchor_fill(target, margin) end
 
----Undoes a previous :anchor_fill. The widget returns to whatever
----size :set_size (or the constructor) gave it.
+---Turns fill mode off. Any anchor lines set before/during fill was
+---active are still there and resume immediately. Size is a rougher
+---edge: while fill was active, every :commit() overwrote this
+---widget's own w/h with fill's computed size, so clear_fill() alone
+---leaves it at whatever fill last computed -- not whatever set_size
+---said before fill started (that old value was never preserved
+---anywhere). Call :set_size() again after clear_fill() if you need a
+---specific size back.
 function Widget:clear_fill() end

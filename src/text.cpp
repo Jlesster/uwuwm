@@ -240,3 +240,9 @@ int TextRenderer::lineHeight(const std::string& font_path, int pixel_size) {
     // FT_Set_Pixel_Sizes has been called (getFace always does, on load).
     return static_cast<int>(fe->face->size->metrics.height >> 6);
 }
+
+int TextRenderer::ascent(const std::string& font_path, int pixel_size) {
+    FaceEntry* fe = impl_->getFace(font_path, pixel_size);
+    if(!fe) { return 0; }
+    return static_cast<int>(fe->face->size->metrics.ascender >> 6);
+}

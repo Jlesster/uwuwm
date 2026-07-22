@@ -190,8 +190,20 @@ Box resolveBox(WidgetWindow& win, int id, std::vector<VisitState>& state) {
             rx    = edgeCoord(t, w.anchor_left.edge) + w.anchor_left.margin;
         } else if(w.anchor_right.edge != Edge::None) {
             Box t = resolveBox(win, w.anchor_right.target_id, state);
+            // Inset convention: a positive rightMargin/bottomMargin
+            // moves the widget *inward* from the target's right/bottom
+            // edge, mirroring how a positive left/topMargin already
+            // moves inward from the left/top edge -- this is what
+            // every anchor-based UI toolkit (QML included) means by
+            // "margin", and the one this class got backwards in an
+            // earlier draft: adding margin here pushed anchored
+            // widgets outward past the target's edge instead, which is
+            // how a clock text anchored to a bar's right edge ended up
+            // rendered entirely off the right side of the bar buffer
+            // (silently clipped by TextRenderer::drawText, not
+            // crashing -- just invisible).
             rx =
-                edgeCoord(t, w.anchor_right.edge) + w.anchor_right.margin - w.w;
+                edgeCoord(t, w.anchor_right.edge) - w.anchor_right.margin - w.w;
         } else if(w.anchor_hcenter.edge != Edge::None) {
             Box t = resolveBox(win, w.anchor_hcenter.target_id, state);
             rx = edgeCoord(t, w.anchor_hcenter.edge) + w.anchor_hcenter.margin -
@@ -203,7 +215,8 @@ Box resolveBox(WidgetWindow& win, int id, std::vector<VisitState>& state) {
             ry    = edgeCoord(t, w.anchor_top.edge) + w.anchor_top.margin;
         } else if(w.anchor_bottom.edge != Edge::None) {
             Box t = resolveBox(win, w.anchor_bottom.target_id, state);
-            ry = edgeCoord(t, w.anchor_bottom.edge) + w.anchor_bottom.margin -
+            // Same inset fix as anchor_right above.
+            ry = edgeCoord(t, w.anchor_bottom.edge) - w.anchor_bottom.margin -
                  w.h;
         } else if(w.anchor_vcenter.edge != Edge::None) {
             Box t = resolveBox(win, w.anchor_vcenter.target_id, state);
@@ -376,6 +389,9 @@ int WidgetWindow::createText(int                parent_id,
     node.text       = text;
     node.pixel_size = pixel_size;
     node.color      = color;
+    node.w =
+        server.text_renderer.measureText(text, defaultFontPath(), pixel_size);
+    node.h = server.text_renderer.lineHeight(defaultFontPath(), pixel_size);
     widgets.push_back(node);
     return static_cast<int>(widgets.size());
 }
@@ -384,7 +400,14 @@ void WidgetWindow::setText(int widget_id, const std::string& text) {
     if(widget_id < 1 || static_cast<size_t>(widget_id) > widgets.size()) {
         return;
     }
-    widgets[static_cast<size_t>(widget_id) - 1].text = text;
+    auto& w = widgets[static_cast<size_t>(widget_id) - 1];
+    w.text  = text;
+    if(w.kind == WidgetKind::Text) {
+        w.w = server.text_renderer.measureText(
+            text, defaultFontPath(), w.pixel_size);
+        // height depends only on font/pixel_size, not on `text` itself
+        // -- already correct from createText(), no need to redo it.
+    }
 }
 
 void WidgetWindow::setColor(int widget_id, uint32_t color) {
@@ -539,14 +562,24 @@ void WidgetWindow::commit() {
                 }
             }
         } else {
+            // node.resolved_x/resolved_y are this widget's top-left box
+            // corner -- same convention every other widget uses, so
+            // anchors targeting a Text widget's top/bottom/vcenter
+            // edge get sane geometry (node.w/h are real, measured
+            // values -- see createText()/setText()). drawText itself
+            // wants a baseline, not a top-left corner, so convert right
+            // here, once, rather than making every anchor computation
+            // upstream reason about baselines.
+            const std::string& font = defaultFontPath();
+            int ascent = server.text_renderer.ascent(font, node.pixel_size);
             server.text_renderer.drawText(pixels.data(),
                                           width * 4,
                                           width,
                                           height,
                                           node.resolved_x,
-                                          node.resolved_y,
+                                          node.resolved_y + ascent,
                                           node.text,
-                                          defaultFontPath(),
+                                          font,
                                           node.pixel_size,
                                           node.color);
         }

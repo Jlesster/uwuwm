@@ -59,6 +59,14 @@ public:
     // fudge factor. 0 if the font couldn't be loaded.
     int lineHeight(const std::string& font_path, int pixel_size);
 
+    // Ascender only (baseline to the top of a typical glyph), in
+    // pixels -- for callers that store a label's position as a
+    // top-left box (uwu.widget's WidgetNode, widget.cpp) rather than
+    // drawText's own baseline-at-(x,y) convention: baseline_y =
+    // box_top_y + ascent(...). 0 if the font couldn't be loaded, same
+    // as lineHeight.
+    int ascent(const std::string& font_path, int pixel_size);
+
 private:
     struct Impl;
     Impl* impl_;

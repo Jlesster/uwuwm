@@ -123,16 +123,26 @@ public:
     //
     // Geometry model (deliberately simple): anchors only ever move a
     // widget's (x, y); they never resize it. `w`/`h` are always
-    // whatever set_size()/the constructor gave them (Text ignores
-    // `w`/`h` -- it measures its own natural size). The one deliberate
-    // exception is `fill`, below, which is a distinct, explicit
-    // operation that sets all four at once -- not a side effect of
-    // combining left+right anchors the way QML's own anchors would.
-    // This means the anchor solver only ever has to resolve positions,
-    // which are always fully determined by already-known
-    // widths/heights -- no "solve for width and position
-    // simultaneously" case, and therefore no way for two anchors to
-    // disagree about a size.
+    // whatever set_size()/the constructor gave them for a Rect; for
+    // Text they're measured automatically from `text`/`pixel_size`
+    // (see createText()/setText() in widget.cpp) rather than
+    // user-set, so anchoring *to* a text label's right/bottom/vcenter
+    // edge gets real geometry instead of always 0. The one deliberate
+    // size exception either way is `fill`, below, which is a
+    // distinct, explicit operation that sets all four at once -- not
+    // a side effect of combining left+right anchors the way QML's own
+    // anchors would. This means the anchor solver only ever has to
+    // resolve positions, which are always fully determined by
+    // already-known widths/heights -- no "solve for width and
+    // position simultaneously" case, and therefore no way for two
+    // anchors to disagree about a size.
+    //
+    // resolved_x/resolved_y (below) are a top-left box corner for
+    // every widget kind, Text included -- uniform with Rect, and with
+    // every other widget's anchor math, on purpose. TextRenderer's own
+    // drawText() wants a baseline instead; that conversion (+ ascent)
+    // happens once, in commit()'s Text paint case, rather than leaking
+    // baseline semantics into the anchor solver itself.
     struct WidgetNode {
         WidgetKind kind;
         // 0 == this widget's parent is the window root (bounds
@@ -148,18 +158,28 @@ public:
         // parent-relative Item.x/Item.y -- and a widget with
         // parent_id == 0 and no anchors behaves exactly like the old
         // flat qml_bar.cpp model, window-local x/y, unchanged).
-        // w/h: always explicit (ignored for Text).
+        // w/h: explicit for Rect (set_size()); measured automatically
+        // for Text (see createText()/setText() in widget.cpp).
         int x = 0, y = 0, w = 0, h = 0;
 
         // Resolved (computed) position, filled in by commit()'s layout
-        // pass each call -- what actually gets painted.
+        // pass each call -- what actually gets painted. Always this
+        // widget's top-left box corner, every kind, including Text
+        // (converted to a baseline only at paint time -- see
+        // commit()'s Text case in widget.cpp).
         int resolved_x = 0, resolved_y = 0;
 
         // At most one of left/right/hcenter can meaningfully apply to
         // the x axis (same for top/bottom/vcenter on y) -- if more
         // than one is set, priority is left > right > hcenter (top >
         // bottom > vcenter), documented and deterministic rather than
-        // "last write wins" or an error.
+        // "last write wins" or an error. `margin` is always an inset:
+        // a positive left/topMargin moves inward from the target's
+        // left/top edge, and a positive right/bottomMargin moves
+        // inward from the target's right/bottom edge too -- the same
+        // convention as CSS padding or QML's own anchors, not "always
+        // added to the raw edge coordinate" (which would push a
+        // right/bottom anchor outward, off the target, instead).
         AnchorLine anchor_left, anchor_right, anchor_hcenter;
         AnchorLine anchor_top, anchor_bottom, anchor_vcenter;
 

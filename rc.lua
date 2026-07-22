@@ -27,11 +27,13 @@
 --         snippets for the rest of your DE (GTK, kitty, foot, waybar,
 --         dunst, wezterm, fuzzel)
 --
--- (lib/paw, lib/nyaa -- see extendPackagePath() in lua_config.cpp for
--- where those get found). A wibox-equivalent (status bar / widgets) is
--- reserved for later, not implemented yet. Drop to `uwu.*` directly any
--- time paw/nyaa don't have what you need -- all three styles compose
--- freely in the same rc.lua.
+-- (lib/paw, lib/nyaa, lib/examples -- see extendPackagePath() in
+-- lua_config.cpp for where those get found). lib/examples/ has four
+-- working bars (bar_1.lua..bar_4.lua) built on uwu.widget.* --
+-- comment the require()s at the bottom of this file in/out to swap
+-- them in. Drop to `uwu.*` directly any time paw/nyaa don't have
+-- what you need -- all three styles compose freely in the same
+-- rc.lua.
 
 local paw = require('paw')
 local nyaa = require('nyaa')
@@ -105,6 +107,13 @@ local apps = paw.defaults({
 local terminal = apps.terminal
 local launcher = apps.launcher
 local mod = { 'mod' }
+
+-- Set to bar_4's show() later in this file (around the "Status bar /
+-- OSDs" section near the bottom). The volume/brightness XF86Audio*
+-- keybinds below call show_osd('volume', n) / show_osd('brightness', n)
+-- if it's set; the `if show_osd then` guard makes those binds safe to
+-- leave in even when no OSD is configured.
+local show_osd = nil
 
 -- ── Special workspaces (scratchpads) ────────────────────────────────────
 -- paw.specialworkspace -- Hyprland-style named scratchpads: a floating
@@ -347,12 +356,17 @@ local keys = {
   -- shells out to wpctl under the hood; brightness reads/writes
   -- /sys/class/backlight directly. Both are silent no-ops if the
   -- underlying tool/device isn't there, so these binds are always safe
-  -- to leave in even on a desktop with no backlight.
+  -- to leave in even on a desktop with no backlight. The show_osd()
+  -- call at the end of each bind is only meaningful when bar_4 has
+  -- been wired in at the bottom of this file -- it flashes the OSD
+  -- popup, and is a silent no-op (a reference to nil) otherwise.
   {
     {},
     'XF86AudioRaiseVolume',
     function()
-      uwu.system.volume.set(math.min((uwu.system.volume.get() or 0) + 5, 150))
+      local v = math.min((uwu.system.volume.get() or 0) + 5, 150)
+      uwu.system.volume.set(v)
+      if show_osd then show_osd('volume', v) end
     end,
     'volume up',
   },
@@ -360,7 +374,9 @@ local keys = {
     {},
     'XF86AudioLowerVolume',
     function()
-      uwu.system.volume.set(math.max((uwu.system.volume.get() or 0) - 5, 0))
+      local v = math.max((uwu.system.volume.get() or 0) - 5, 0)
+      uwu.system.volume.set(v)
+      if show_osd then show_osd('volume', v) end
     end,
     'volume down',
   },
@@ -369,9 +385,9 @@ local keys = {
     {},
     'XF86MonBrightnessUp',
     function()
-      uwu.system.brightness.set(
-        math.min((uwu.system.brightness.get() or 0) + 5, 100)
-      )
+      local b = math.min((uwu.system.brightness.get() or 0) + 5, 100)
+      uwu.system.brightness.set(b)
+      if show_osd then show_osd('brightness', b) end
     end,
     'brightness up',
   },
@@ -379,9 +395,9 @@ local keys = {
     {},
     'XF86MonBrightnessDown',
     function()
-      uwu.system.brightness.set(
-        math.max((uwu.system.brightness.get() or 0) - 5, 1)
-      )
+      local b = math.max((uwu.system.brightness.get() or 0) - 5, 1)
+      uwu.system.brightness.set(b)
+      if show_osd then show_osd('brightness', b) end
     end,
     'brightness down',
   },
@@ -593,10 +609,11 @@ end)
 -- Keybind this to mod+shift+s for "tidy slack back onto the laptop
 -- panel" if you tend to drag it onto an external display by accident.
 
--- ── Status bar ───────────────────────────────────────────────────────
+-- ── Status bar / OSDs ───────────────────────────────────────────────
 -- uwu.widget.window({...}) -- a retained-mode widget surface
 -- (src/widget.cpp). Two modes:
---   mode = "bar"   (default) -- anchored to an output edge
+--   mode = "bar"   (default) -- anchored to an output edge, full
+--                    output width, drawn in the layer-shell TOP layer
 --   mode = "popup" -- a fixed-size floating box (OSD/dashboard),
 --                    positioned by screen anchor + margin, drawn
 --                    above everything. Starts hidden -- call :show(),
@@ -608,6 +625,39 @@ end)
 -- window; edges are left/right/top/bottom/hcenter/vcenter.
 -- :anchor_fill(target, margin) covers target entirely, inset by
 -- margin (the one case anchors are allowed to resize a widget).
+--
+-- The four lib/examples/bar_*.lua files are working bars built on
+-- that API -- drop any of them in by uncommenting its require() and
+-- :setup() call below. Each handles monitor_connected itself (a
+-- new output gets its own bar) and monitor_disconnected (its bar is
+-- torn down on unplug), so the rc.lua doesn't need to manage any
+-- per-output bookkeeping. See each file's header comment for what
+-- it does and what opts it accepts.
+
+-- local bar_1 = require('examples.bar_1')
+-- local bar_2 = require('examples.bar_2')
+-- local bar_3 = require('examples.bar_3')
+-- local bar_4 = require('examples.bar_4')
+--
+-- bar_1.setup({ height = 28 })            -- top bar: tag + clock
+-- bar_2.setup({ height = 30 })            -- top three-zone (tags/title/tray)
+-- bar_3.setup({ height = 32 })            -- bottom bar: tag pills + sys stats
+-- do
+--   local show                     -- bar_4.setup returns (show, teardown)
+--   show, _teardown = bar_4.setup({ -- popup OSD: volume/brightness +
+--     width = 360, height = 96,     -- workspace/clock/title in pills
+--   })
+--   -- (assign show to the local at the top of this file with the
+--   -- same name the XF86 keybinds use; see the OSD section below)
+-- end
+-- -- call show_osd('volume', n) / show_osd('brightness', n) from the
+-- -- matching keybinds below to flash the OSD; see the XF86Audio*
+-- -- and XF86MonBrightness* binds in the keys{} table.
+
+-- The rest of this section wires up the same configuration using the
+-- inline hand-rolled widgets (top bar + bottom-popup volume OSD) that
+-- used to live here before the lib/examples files existed. Comment
+-- this out and uncomment the require()s above to switch.
 
 local function setup_bar()
   local bar = uwu.widget.window({ mode = 'bar', position = 'top', height = 28 })
@@ -676,6 +726,15 @@ end
 
 setup_bar()
 local show_volume_osd = setup_volume_osd()
--- call show_volume_osd(72) from a volume keybind, etc.
+-- The XF86Audio* / XF86MonBrightness* binds near the top of this file
+-- call show_osd('volume', n) / show_osd('brightness', n). The inline
+-- OSD only knows about volume, so adapt its signature here. When you
+-- switch to bar_4 (uncomment the require() block above), replace this
+-- line with:
+--   do local s; s, _t = bar_4.setup({ width = 360, height = 96 })
+--     show_osd = s end
+-- and the same XF86 keys will then flash the OSD for both volume and
+-- brightness.
+show_osd = function(_, level) show_volume_osd(level) end
 
 paw.on('monitor_connected', setup_bar)

@@ -2471,6 +2471,42 @@ int l_widget_set_size(lua_State* L) {
     return 0;
 }
 
+// widget:width() / widget:height() -- return the *measured* size of a
+// child widget (the same value that was used by the last commit() to
+// paint it). For a Rect this is whatever set_size() set; for a Text
+// it's the auto-measured text bounds from the last commit, which is
+// what a Lua caller needs to size a sibling pill to wrap its label.
+//
+// Reads `WidgetNode::w/h` directly rather than going through any
+// scene-graph API: the source of truth is the resolver's last output,
+// and it's already there before the pixels are uploaded. Widget id
+// 0 == the window root (which has w == window.width, h ==
+// window.height) -- reading it works and returns those.
+int l_widget_node_width(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win = checkWidgetOwner(L, 1, widget_id);
+    if(widget_id < 0
+       || static_cast<size_t>(widget_id) > win->widgets.size()) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    if(widget_id == 0) { lua_pushinteger(L, win->width); }
+    else { lua_pushinteger(L, win->widgets[widget_id - 1].w); }
+    return 1;
+}
+int l_widget_node_height(lua_State* L) {
+    int           widget_id;
+    WidgetWindow* win = checkWidgetOwner(L, 1, widget_id);
+    if(widget_id < 0
+       || static_cast<size_t>(widget_id) > win->widgets.size()) {
+        lua_pushinteger(L, 0);
+        return 1;
+    }
+    if(widget_id == 0) { lua_pushinteger(L, win->height); }
+    else { lua_pushinteger(L, win->widgets[widget_id - 1].h); }
+    return 1;
+}
+
 // widget:anchor(my_edge, target, target_edge, margin) -- target is
 // nil (this widget's own parent) or another uwu.Widget from the same
 // window.
@@ -2552,16 +2588,18 @@ const luaL_Reg kWidgetWindowMethods[] = {
 };
 
 const luaL_Reg kWidgetMethods[] = {
-    {"set_text",      l_widget_set_text     },
-    {"set_color",     l_widget_set_color    },
-    {"set_pos",       l_widget_set_pos      },
-    {"set_size",      l_widget_set_size     },
-    {"anchor",        l_widget_anchor       },
-    {"clear_anchor",  l_widget_clear_anchor },
-    {"clear_anchors", l_widget_clear_anchors},
-    {"anchor_fill",   l_widget_anchor_fill  },
-    {"clear_fill",    l_widget_clear_fill   },
-    {nullptr,         nullptr               },
+    {"set_text",      l_widget_set_text      },
+    {"set_color",     l_widget_set_color     },
+    {"set_pos",       l_widget_set_pos       },
+    {"set_size",      l_widget_set_size      },
+    {"width",         l_widget_node_width    },
+    {"height",        l_widget_node_height   },
+    {"anchor",        l_widget_anchor        },
+    {"clear_anchor",  l_widget_clear_anchor  },
+    {"clear_anchors", l_widget_clear_anchors },
+    {"anchor_fill",   l_widget_anchor_fill   },
+    {"clear_fill",    l_widget_clear_fill    },
+    {nullptr,         nullptr                },
 };
 
 const luaL_Reg kWidgetNamespaceFuncs[] = {
